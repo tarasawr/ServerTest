@@ -1,7 +1,15 @@
+const http = require('http');
 const WebSocket = require('ws');
 
-const PORT = 3000;
-const wss = new WebSocket.Server({ port: PORT });
+const PORT = process.env.PORT || 3000;
+
+// HTTP server (required by Render for health checks + WebSocket upgrade)
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end(`Multiplayer server OK. Players online: ${players.size}`);
+});
+
+const wss = new WebSocket.Server({ server });
 
 // playerId counter
 let nextId = 1;
@@ -89,5 +97,7 @@ function broadcast(sender, obj) {
   }
 }
 
-console.log(`Multiplayer relay server running on ws://localhost:${PORT}`);
-console.log('Waiting for players...');
+server.listen(PORT, () => {
+  console.log(`Multiplayer relay server running on port ${PORT}`);
+  console.log('Waiting for players...');
+});
