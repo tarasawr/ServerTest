@@ -89,10 +89,10 @@ class Bot {
     this.broadcastAll({
       type: 'pointer',
       playerId: this.id,
-      origin: { x: this.position.x, y: this.position.y + 1, z: this.position.z },
+      origin: { x: this.position.x, y: this.position.y, z: this.position.z },
       target: {
         x: this.position.x + Math.sin(yRad) * pointerDist,
-        y: this.position.y + 0.5,
+        y: this.position.y,
         z: this.position.z + Math.cos(yRad) * pointerDist,
       },
     });
