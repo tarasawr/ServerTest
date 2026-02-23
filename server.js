@@ -86,6 +86,9 @@ wss.on('connection', (ws) => {
         }
       }
 
+      // Record player path for bots to follow
+      botManager.recordPosition(msg.position, msg.rotation);
+
       broadcast(ws, {
         type: 'player_moved',
         playerId: playerId,

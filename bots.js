@@ -1,63 +1,79 @@
-// Bot system - virtual players that walk around randomly
-// If a bot doesn't move 0.5m in 2 seconds, it changes direction (hit a wall)
+// Bot system - bots follow the player's path with delay
+// Each bot replays the player's recorded positions with a different time offset
+// Occasionally a bot "backtracks" to a random earlier point in the path
 
 const BOT_CONFIG = {
   count: 3,
-  speed: 1.5,           // meters per second
-  updateInterval: 100,   // ms between position broadcasts
-  stuckCheckInterval: 2000, // ms - check if stuck
-  stuckThreshold: 0.5,  // meters - min distance in stuckCheckInterval to not be "stuck"
-  spawnRadius: 0.5,     // meters - max random offset from player spawn point
+  updateInterval: 100,     // ms between position broadcasts
+  pathMaxLength: 600,       // max recorded path points (~60 sec at 10hz)
+  delayPerBot: 20,          // path index offset between bots (20 = 2 sec delay at 100ms)
+  backtrackChance: 0.003,   // chance per tick to backtrack (~once per 30 sec)
+  backtrackSteps: 30,       // how many steps back to jump (30 = 3 sec back)
+  spawnRadius: 0.5,
 };
 
 class Bot {
-  constructor(id, broadcastAll, spawnPosition) {
+  constructor(id, broadcastAll, spawnPosition, pathDelay) {
     this.id = id;
     this.broadcastAll = broadcastAll;
+    this.pathDelay = pathDelay; // how many steps behind the player
 
-    // Spawn near the player with random offset
-    const r = BOT_CONFIG.spawnRadius;
+    // Start near the player
     this.position = {
-      x: spawnPosition.x + randomRange(-r, r),
+      x: spawnPosition.x + randomRange(-BOT_CONFIG.spawnRadius, BOT_CONFIG.spawnRadius),
       y: spawnPosition.y,
-      z: spawnPosition.z + randomRange(-r, r),
+      z: spawnPosition.z + randomRange(-BOT_CONFIG.spawnRadius, BOT_CONFIG.spawnRadius),
     };
+    this.rotation = { y: 0 };
 
-    // Pick random direction
-    this.pickNewDirection();
+    // Current index in the shared path
+    this.pathIndex = 0;
+    this.backtracking = false;
+    this.backtrackTarget = 0;
 
-    // For stuck detection
-    this.lastCheckPosition = { ...this.position };
-
-    this._moveTimer = null;
-    this._stuckTimer = null;
+    this._timer = null;
   }
 
-  pickNewDirection() {
-    const angle = Math.random() * Math.PI * 2;
-    this.dirX = Math.cos(angle);
-    this.dirZ = Math.sin(angle);
-    this.rotation = { y: angle * (180 / Math.PI) };
-  }
-
-  start() {
-    // Movement tick
-    this._moveTimer = setInterval(() => this.tick(), BOT_CONFIG.updateInterval);
-
-    // Stuck detection
-    this._stuckTimer = setInterval(() => this.checkStuck(), BOT_CONFIG.stuckCheckInterval);
+  start(pathRef) {
+    this.path = pathRef; // shared reference to player path array
+    this._timer = setInterval(() => this.tick(), BOT_CONFIG.updateInterval);
   }
 
   stop() {
-    if (this._moveTimer) clearInterval(this._moveTimer);
-    if (this._stuckTimer) clearInterval(this._stuckTimer);
+    if (this._timer) clearInterval(this._timer);
   }
 
   tick() {
-    const dt = BOT_CONFIG.updateInterval / 1000;
+    if (this.path.length === 0) return;
 
-    this.position.x += this.dirX * BOT_CONFIG.speed * dt;
-    this.position.z += this.dirZ * BOT_CONFIG.speed * dt;
+    // Target index: follow player path with delay
+    const headIndex = this.path.length - 1;
+    let targetIndex = headIndex - this.pathDelay;
+
+    // Random backtrack
+    if (!this.backtracking && Math.random() < BOT_CONFIG.backtrackChance && targetIndex > BOT_CONFIG.backtrackSteps) {
+      this.backtracking = true;
+      this.backtrackTarget = targetIndex - BOT_CONFIG.backtrackSteps;
+      this.pathIndex = targetIndex;
+    }
+
+    if (this.backtracking) {
+      // Move backwards through the path
+      this.pathIndex = Math.max(this.pathIndex - 1, this.backtrackTarget);
+      if (this.pathIndex <= this.backtrackTarget) {
+        this.backtracking = false; // done backtracking, resume following
+      }
+      targetIndex = this.pathIndex;
+    } else {
+      targetIndex = Math.max(0, targetIndex);
+      this.pathIndex = targetIndex;
+    }
+
+    const point = this.path[targetIndex];
+    if (!point) return;
+
+    this.position = { ...point.position };
+    this.rotation = { ...point.rotation };
 
     // Broadcast movement
     this.broadcastAll({
@@ -67,36 +83,19 @@ class Bot {
       rotation: this.rotation,
     });
 
-    // Broadcast pointer - ray from bot's position forward along movement direction
+    // Broadcast pointer - look forward along rotation
+    const yRad = (this.rotation.y || 0) * Math.PI / 180;
     const pointerDist = 5;
     this.broadcastAll({
       type: 'pointer',
       playerId: this.id,
       origin: { x: this.position.x, y: this.position.y + 1, z: this.position.z },
       target: {
-        x: this.position.x + this.dirX * pointerDist,
+        x: this.position.x + Math.sin(yRad) * pointerDist,
         y: this.position.y + 0.5,
-        z: this.position.z + this.dirZ * pointerDist,
+        z: this.position.z + Math.cos(yRad) * pointerDist,
       },
     });
-  }
-
-  checkStuck() {
-    const dx = this.position.x - this.lastCheckPosition.x;
-    const dz = this.position.z - this.lastCheckPosition.z;
-    const dist = Math.sqrt(dx * dx + dz * dz);
-
-    if (dist < BOT_CONFIG.stuckThreshold) {
-      console.log(`[Bot ${this.id}] Stuck (moved ${dist.toFixed(2)}m), changing direction`);
-      this.pickNewDirection();
-    }
-
-    this.lastCheckPosition = { ...this.position };
-  }
-
-  updateRotation() {
-    const angle = Math.atan2(this.dirZ, this.dirX);
-    this.rotation = { y: angle * (180 / Math.PI) };
   }
 
   toPlayerData() {
@@ -120,41 +119,49 @@ class BotManager {
   constructor() {
     this.bots = [];
     this._started = false;
+    this._path = []; // shared path recorded from player
   }
 
-  /**
-   * Spawn bots near a player's position
-   * @param {number} startId - first bot playerId
-   * @param {function} broadcastAll - function(msgObj) sends to all real players
-   * @param {{x,y,z}} spawnPosition - player position to spawn near
-   */
+  /** Record a player's position into the shared path */
+  recordPosition(position, rotation) {
+    this._path.push({ position: { ...position }, rotation: { ...rotation } });
+    // Trim to max length
+    if (this._path.length > BOT_CONFIG.pathMaxLength) {
+      this._path.shift();
+      // Adjust bot indices
+      for (const bot of this.bots) {
+        bot.pathIndex = Math.max(0, bot.pathIndex - 1);
+        if (bot.backtracking) {
+          bot.backtrackTarget = Math.max(0, bot.backtrackTarget - 1);
+        }
+      }
+    }
+  }
+
   start(startId, broadcastAll, spawnPosition) {
     if (this._started) return;
     this._started = true;
 
-    console.log(`[Bots] Spawning ${BOT_CONFIG.count} bots near (${spawnPosition.x.toFixed(1)}, ${spawnPosition.z.toFixed(1)})`);
+    console.log(`[Bots] Spawning ${BOT_CONFIG.count} bots following player path`);
 
     for (let i = 0; i < BOT_CONFIG.count; i++) {
-      const bot = new Bot(startId + i, broadcastAll, spawnPosition);
+      const delay = BOT_CONFIG.delayPerBot * (i + 1); // bot 0 = 2s delay, bot 1 = 4s, bot 2 = 6s
+      const bot = new Bot(startId + i, broadcastAll, spawnPosition, delay);
       this.bots.push(bot);
-      bot.start();
+      bot.start(this._path);
     }
   }
 
   stop() {
-    for (const bot of this.bots) {
-      bot.stop();
-    }
+    for (const bot of this.bots) bot.stop();
     this.bots = [];
-    console.log('[Bots] All bots stopped');
+    this._path = [];
   }
 
-  /** Get bot data array for welcome message */
   getAllPlayerData() {
     return this.bots.map(b => b.toPlayerData());
   }
 
-  /** Get bot IDs set for filtering */
   getBotIds() {
     return new Set(this.bots.map(b => b.id));
   }
