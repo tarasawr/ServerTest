@@ -19,7 +19,7 @@ const players = new Map();
 
 wss.on('connection', (ws) => {
   const playerId = nextId++;
-  players.set(ws, { id: playerId, position: { x: 0, y: 0, z: 0 }, rotation: { y: 0 } });
+  players.set(ws, { id: playerId, position: { x: 0, y: 0, z: 0 }, rotation: { y: 0 }, pointer: { x: 0, y: 0, z: 0 } });
 
   console.log(`[+] Player ${playerId} connected (total: ${players.size})`);
 
@@ -42,7 +42,8 @@ wss.on('connection', (ws) => {
     type: 'player_joined',
     playerId: playerId,
     position: { x: 0, y: 0, z: 0 },
-    rotation: { y: 0 }
+    rotation: { y: 0 },
+    pointer: { x: 0, y: 0, z: 0 }
   });
 
   ws.on('message', (raw) => {
@@ -59,13 +60,15 @@ wss.on('connection', (ws) => {
       const player = players.get(ws);
       player.position = msg.position;
       player.rotation = msg.rotation;
+      player.pointer = msg.pointer || { x: 0, y: 0, z: 0 };
 
       // Relay to all others
       broadcast(ws, {
         type: 'player_moved',
         playerId: playerId,
         position: msg.position,
-        rotation: msg.rotation
+        rotation: msg.rotation,
+        pointer: player.pointer
       });
     }
   });
