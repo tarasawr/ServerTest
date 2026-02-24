@@ -107,7 +107,7 @@ wss.on('connection', (ws) => {
     }
 
     if (msg.type === 'furniture_move') {
-      broadcast(ws, { type: 'furniture_move', playerId, furnitureId: msg.furnitureId, position: msg.position, rotation: msg.rotation, planeOffset: msg.planeOffset });
+      broadcast(ws, { type: 'furniture_move', playerId, furnitureId: msg.furnitureId, position: msg.position, rotation: msg.rotation, planeOffset: msg.planeOffset, committed: msg.committed });
     }
 
     if (msg.type === 'furniture_add') {
