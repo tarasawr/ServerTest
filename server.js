@@ -105,6 +105,20 @@ wss.on('connection', (ws) => {
         target: msg.target
       });
     }
+
+    if (msg.type === 'furniture_action') {
+      broadcast(ws, {
+        type: 'furniture_action',
+        playerId: playerId,
+        action: msg.action,
+        furnitureId: msg.furnitureId,
+        position: msg.position,
+        rotation: msg.rotation,
+        planeOffset: msg.planeOffset,
+        variationPath: msg.variationPath,
+        parentId: msg.parentId
+      });
+    }
   });
 
   ws.on('close', () => {
