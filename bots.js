@@ -3,7 +3,7 @@
 // Occasionally a bot "backtracks" to a random earlier point in the path
 
 const BOT_CONFIG = {
-  count: 3,
+  count: 0,
   updateInterval: 100,     // ms between position broadcasts
   pathMaxLength: 600,       // max recorded path points (~60 sec at 10hz)
   delayPerBot: 20,          // path index offset between bots (20 = 2 sec delay at 100ms)
