@@ -106,18 +106,16 @@ wss.on('connection', (ws) => {
       });
     }
 
-    if (msg.type === 'furniture_action') {
-      broadcast(ws, {
-        type: 'furniture_action',
-        playerId: playerId,
-        action: msg.action,
-        furnitureId: msg.furnitureId,
-        position: msg.position,
-        rotation: msg.rotation,
-        planeOffset: msg.planeOffset,
-        variationPath: msg.variationPath,
-        parentId: msg.parentId
-      });
+    if (msg.type === 'furniture_move') {
+      broadcast(ws, { type: 'furniture_move', playerId, furnitureId: msg.furnitureId, position: msg.position, rotation: msg.rotation, planeOffset: msg.planeOffset });
+    }
+
+    if (msg.type === 'furniture_add') {
+      broadcast(ws, { type: 'furniture_add', playerId, furnitureId: msg.furnitureId, variationPath: msg.variationPath, position: msg.position, rotation: msg.rotation, planeOffset: msg.planeOffset, parentId: msg.parentId });
+    }
+
+    if (msg.type === 'furniture_remove') {
+      broadcast(ws, { type: 'furniture_remove', playerId, furnitureId: msg.furnitureId });
     }
   });
 
