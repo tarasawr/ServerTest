@@ -19,6 +19,14 @@ const clients = new Map();   // WebSocket -> ClientState
 
 // --- Helpers ---
 
+function ts() {
+  return new Date().toISOString().slice(11, 23);
+}
+
+function log(tag, msg) {
+  console.log(`${ts()} [${tag}] ${msg}`);
+}
+
 function generateCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
   let code = '';
@@ -31,6 +39,8 @@ function send(ws, obj) {
 }
 
 function sendError(ws, code, message) {
+  const client = clients.get(ws);
+  log('Error', `player=${client?.playerId} code=${code} msg="${message}"`);
   send(ws, { type: 'session_error', code, message });
 }
 
@@ -41,13 +51,22 @@ function findSessionById(id) {
 
 function broadcastToSession(session, excludeWs, obj) {
   const data = JSON.stringify(obj);
+  let count = 0;
   for (const [, p] of session.players) {
-    if (p.ws !== excludeWs && p.ws.readyState === WebSocket.OPEN) p.ws.send(data);
+    if (p.ws !== excludeWs && p.ws.readyState === WebSocket.OPEN) {
+      p.ws.send(data);
+      count++;
+    }
   }
+  return count;
 }
 
 function canEdit(role) {
   return role === 'owner' || role === 'co-author' || role === 'guest-edit';
+}
+
+function sessionInfo(session) {
+  return `${session.id} (players: ${session.players.size}, seq: ${session.sequenceNumber})`;
 }
 
 // --- Legacy: auto-create/join default session for clients that skip create_session ---
@@ -66,7 +85,7 @@ function getOrCreateLegacySession(ws, client) {
       players: new Map()
     };
     sessions.set(LEGACY_INVITE, session);
-    console.log('[Legacy] Session created');
+    log('Legacy', 'Session created');
   }
 
   const player = {
@@ -90,7 +109,7 @@ function getOrCreateLegacySession(ws, client) {
     position: player.position, rotation: player.rotation
   });
 
-  console.log(`[Legacy] Player ${client.playerId} auto-joined (total: ${session.players.size})`);
+  log('Legacy', `Player ${client.playerId} auto-joined (total: ${session.players.size})`);
   return session;
 }
 
@@ -133,14 +152,14 @@ function handleCreateSession(ws, client, msg) {
     sequenceNumber: 0, playerId: client.playerId
   });
 
-  console.log(`[Session] Created ${sessionId} (invite: ${inviteCode}) by player ${client.playerId}`);
+  log('Session', `Created ${sessionId} (invite: ${inviteCode}, permission: ${linkPermission}) by player ${client.playerId}`);
 }
 
 function handleJoinSession(ws, client, msg) {
   if (client.sessionId) { sendError(ws, 'ALREADY_IN_SESSION', 'Already in a session'); return; }
 
   const session = sessions.get(msg.inviteCode);
-  if (!session) { sendError(ws, 'NOT_FOUND', 'Session not found'); return; }
+  if (!session) { sendError(ws, 'NOT_FOUND', `Session not found: ${msg.inviteCode}`); return; }
   if (session.linkPermission === 'none') { sendError(ws, 'NO_ACCESS', 'Link disabled'); return; }
   if (session.players.size >= 25) { sendError(ws, 'SESSION_FULL', 'Max 25 players'); return; }
 
@@ -176,7 +195,7 @@ function handleJoinSession(ws, client, msg) {
     position: player.position, rotation: player.rotation
   });
 
-  console.log(`[Session] Player ${client.playerId} joined ${session.id} as ${role} (total: ${session.players.size})`);
+  log('Session', `Player ${client.playerId} joined ${session.id} as ${role} (total: ${session.players.size})`);
 }
 
 function leaveSession(ws, client) {
@@ -195,16 +214,16 @@ function leaveSession(ws, client) {
       if (c) c.sessionId = null;
     }
     sessions.delete(session.inviteCode);
-    console.log(`[Session] ${session.id} closed (owner left)`);
+    log('Session', `${session.id} closed (owner left, kicked ${session.players.size} players)`);
   } else {
     broadcastToSession(session, ws, { type: 'player_left', playerId: client.playerId });
-    console.log(`[Session] Player ${client.playerId} left ${session.id} (total: ${session.players.size})`);
+    log('Session', `Player ${client.playerId} left ${session.id} (total: ${session.players.size})`);
   }
 
   // Clean up empty legacy session
   if (session.inviteCode === LEGACY_INVITE && session.players.size === 0) {
     sessions.delete(LEGACY_INVITE);
-    console.log('[Legacy] Session removed (empty)');
+    log('Legacy', 'Session removed (empty)');
   }
 }
 
@@ -237,93 +256,126 @@ function handleFurnitureMove(ws, client, msg) {
   const session = getSession(ws, client, true);
   if (!session) return;
   const role = session.players.get(client.playerId)?.role;
-  if (!canEdit(role)) return;
+  if (!canEdit(role)) {
+    log('Denied', `player=${client.playerId} furniture_move (role: ${role})`);
+    return;
+  }
   if (msg.committed) session.sequenceNumber++;
 
-  broadcastToSession(session, ws, {
+  const n = broadcastToSession(session, ws, {
     type: 'furniture_move', playerId: client.playerId,
     furnitureId: msg.furnitureId, position: msg.position,
     rotation: msg.rotation, planeOffset: msg.planeOffset,
     committed: msg.committed
   });
+
+  if (msg.committed)
+    log('Furniture', `move committed "${msg.furnitureId}" by player=${client.playerId} → ${n} peers (seq: ${session.sequenceNumber})`);
 }
 
 function handleFurnitureAdd(ws, client, msg) {
   const session = getSession(ws, client, true);
   if (!session) return;
   const role = session.players.get(client.playerId)?.role;
-  if (!canEdit(role)) return;
+  if (!canEdit(role)) {
+    log('Denied', `player=${client.playerId} furniture_add (role: ${role})`);
+    return;
+  }
   session.sequenceNumber++;
 
-  broadcastToSession(session, ws, {
+  const n = broadcastToSession(session, ws, {
     type: 'furniture_add', playerId: client.playerId,
     furnitureId: msg.furnitureId, variationPath: msg.variationPath,
     position: msg.position, rotation: msg.rotation,
     planeOffset: msg.planeOffset, parentId: msg.parentId
   });
+
+  log('Furniture', `add "${msg.furnitureId}" variation="${msg.variationPath}" by player=${client.playerId} → ${n} peers (seq: ${session.sequenceNumber})`);
 }
 
 function handleFurnitureRemove(ws, client, msg) {
   const session = getSession(ws, client, true);
   if (!session) return;
   const role = session.players.get(client.playerId)?.role;
-  if (!canEdit(role)) return;
+  if (!canEdit(role)) {
+    log('Denied', `player=${client.playerId} furniture_remove (role: ${role})`);
+    return;
+  }
   session.sequenceNumber++;
 
-  broadcastToSession(session, ws, {
+  const n = broadcastToSession(session, ws, {
     type: 'furniture_remove', playerId: client.playerId,
     furnitureId: msg.furnitureId
   });
+
+  log('Furniture', `remove "${msg.furnitureId}" by player=${client.playerId} → ${n} peers (seq: ${session.sequenceNumber})`);
 }
 
 function handleFurnitureChangeVariation(ws, client, msg) {
   const session = getSession(ws, client, true);
   if (!session) return;
   const role = session.players.get(client.playerId)?.role;
-  if (!canEdit(role)) return;
+  if (!canEdit(role)) {
+    log('Denied', `player=${client.playerId} furniture_change_variation (role: ${role})`);
+    return;
+  }
   session.sequenceNumber++;
 
-  broadcastToSession(session, ws, {
+  const n = broadcastToSession(session, ws, {
     type: 'furniture_change_variation', playerId: client.playerId,
     furnitureId: msg.furnitureId, variationPath: msg.variationPath
   });
+
+  log('Furniture', `change_variation "${msg.furnitureId}" → "${msg.variationPath}" by player=${client.playerId} → ${n} peers`);
 }
 
 function handleMaterialChange(ws, client, msg) {
   const session = getSession(ws, client, true);
   if (!session) return;
   const role = session.players.get(client.playerId)?.role;
-  if (!canEdit(role)) return;
+  if (!canEdit(role)) {
+    log('Denied', `player=${client.playerId} material_change (role: ${role})`);
+    return;
+  }
   session.sequenceNumber++;
 
-  broadcastToSession(session, ws, {
+  const n = broadcastToSession(session, ws, {
     type: 'material_change', playerId: client.playerId,
     targetId: msg.targetId, targetType: msg.targetType,
     materialPath: msg.materialPath, categoryId: msg.categoryId || null
   });
+
+  log('Material', `change target="${msg.targetId}" type="${msg.targetType}" by player=${client.playerId} → ${n} peers`);
 }
 
 function handleUpdateState(ws, client, msg) {
   const session = getSession(ws, client, false);
   if (!session) return;
-  if (client.playerId !== session.ownerId) return;
+  if (client.playerId !== session.ownerId) {
+    log('Denied', `player=${client.playerId} update_state (not owner)`);
+    return;
+  }
+  const xmlLen = (msg.projectXml || '').length;
   session.projectXml = msg.projectXml || session.projectXml;
-  console.log(`[Session] ${session.id} state updated (seq: ${session.sequenceNumber})`);
+  log('Session', `${session.id} state updated by player=${client.playerId} (xml: ${xmlLen} chars, seq: ${session.sequenceNumber})`);
 }
 
 function handleLinkPermissionChange(ws, client, msg) {
   const session = getSession(ws, client, false);
   if (!session) return;
-  if (client.playerId !== session.ownerId) return;
+  if (client.playerId !== session.ownerId) {
+    log('Denied', `player=${client.playerId} link_permission_change (not owner)`);
+    return;
+  }
 
   const permission = msg.linkPermission || 'edit';
   session.linkPermission = permission;
 
-  broadcastToSession(session, null, {
+  const n = broadcastToSession(session, null, {
     type: 'link_permission_changed', linkPermission: permission
   });
 
-  console.log(`[Session] ${session.id} link permission changed to ${permission}`);
+  log('Session', `${session.id} link permission → ${permission} by player=${client.playerId} → ${n} peers`);
 }
 
 // --- Connection ---
@@ -331,12 +383,20 @@ function handleLinkPermissionChange(ws, client, msg) {
 wss.on('connection', (ws) => {
   const playerId = nextPlayerId++;
   clients.set(ws, { playerId, sessionId: null, ws });
-  console.log(`[+] Player ${playerId} connected (total: ${clients.size})`);
+  log('Connect', `Player ${playerId} connected (total: ${clients.size})`);
 
   ws.on('message', (raw) => {
     let msg;
-    try { msg = JSON.parse(raw); } catch (e) { sendError(ws, 'INVALID_MESSAGE', 'Bad JSON'); return; }
-    if (!msg.type) { sendError(ws, 'INVALID_MESSAGE', 'Missing type'); return; }
+    try { msg = JSON.parse(raw); } catch (e) {
+      log('Error', `Player ${clients.get(ws)?.playerId} sent invalid JSON: ${String(raw).slice(0, 100)}`);
+      sendError(ws, 'INVALID_MESSAGE', 'Bad JSON');
+      return;
+    }
+    if (!msg.type) {
+      log('Error', `Player ${clients.get(ws)?.playerId} sent message without type`);
+      sendError(ws, 'INVALID_MESSAGE', 'Missing type');
+      return;
+    }
 
     const client = clients.get(ws);
 
@@ -353,7 +413,9 @@ wss.on('connection', (ws) => {
       case 'material_change': handleMaterialChange(ws, client, msg); break;
       case 'update_state':   handleUpdateState(ws, client, msg); break;
       case 'link_permission_change': handleLinkPermissionChange(ws, client, msg); break;
-      default: break; // Unknown types silently ignored
+      default:
+        log('Warn', `Player ${client.playerId} sent unknown type: "${msg.type}"`);
+        break;
     }
   });
 
@@ -361,11 +423,16 @@ wss.on('connection', (ws) => {
     const client = clients.get(ws);
     if (client?.sessionId) leaveSession(ws, client);
     clients.delete(ws);
-    console.log(`[-] Player ${client?.playerId} disconnected (total: ${clients.size})`);
+    log('Disconnect', `Player ${client?.playerId} disconnected (total: ${clients.size})`);
+  });
+
+  ws.on('error', (err) => {
+    const client = clients.get(ws);
+    log('Error', `Player ${client?.playerId} websocket error: ${err.message}`);
   });
 });
 
 server.listen(PORT, () => {
-  console.log(`Multiplayer server running on port ${PORT}`);
-  console.log('Legacy mode: clients auto-join default session on first message');
+  log('Server', `Multiplayer server running on port ${PORT}`);
+  log('Server', 'Legacy mode: clients auto-join default session on first message');
 });
