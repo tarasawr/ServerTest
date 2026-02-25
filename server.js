@@ -127,6 +127,16 @@ function getSession(ws, client, autoJoinLegacy) {
 function handleCreateSession(ws, client, msg) {
   if (client.sessionId) { sendError(ws, 'ALREADY_IN_SESSION', 'Already in a session'); return; }
 
+  // Dev mode: if another non-legacy session exists, auto-join it instead of creating a new one
+  for (const [code, existing] of sessions) {
+    if (code === LEGACY_INVITE) continue;
+    if (existing.players.size > 0) {
+      log('Session', `Dev auto-join: player ${client.playerId} → existing session ${existing.id} (invite: ${code})`);
+      msg.inviteCode = code;
+      return handleJoinSession(ws, client, msg);
+    }
+  }
+
   const inviteCode = generateCode();
   const sessionId = 'sess_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   const linkPermission = msg.linkPermission || 'edit';
