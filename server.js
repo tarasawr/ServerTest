@@ -311,6 +311,21 @@ function handleUpdateState(ws, client, msg) {
   console.log(`[Session] ${session.id} state updated (seq: ${session.sequenceNumber})`);
 }
 
+function handleLinkPermissionChange(ws, client, msg) {
+  const session = getSession(ws, client, false);
+  if (!session) return;
+  if (client.playerId !== session.ownerId) return;
+
+  const permission = msg.linkPermission || 'edit';
+  session.linkPermission = permission;
+
+  broadcastToSession(session, null, {
+    type: 'link_permission_changed', linkPermission: permission
+  });
+
+  console.log(`[Session] ${session.id} link permission changed to ${permission}`);
+}
+
 // --- Connection ---
 
 wss.on('connection', (ws) => {
@@ -337,6 +352,7 @@ wss.on('connection', (ws) => {
       case 'furniture_change_variation': handleFurnitureChangeVariation(ws, client, msg); break;
       case 'material_change': handleMaterialChange(ws, client, msg); break;
       case 'update_state':   handleUpdateState(ws, client, msg); break;
+      case 'link_permission_change': handleLinkPermissionChange(ws, client, msg); break;
       default: break; // Unknown types silently ignored
     }
   });
