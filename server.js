@@ -23,6 +23,22 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // GET /sessions/latest/project — returns projectXml of the first active session
+  if (url.pathname === '/sessions/latest/project') {
+    for (const [code, s] of sessions) {
+      if (code === LEGACY_INVITE) continue;
+      if (s.players.size > 0) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ inviteCode: code, projectXml: s.projectXml }));
+        log('HTTP', `Served project XML for session ${s.id} (${s.projectXml.length} chars)`);
+        return;
+      }
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'No active session' }));
+    return;
+  }
+
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end(`Multiplayer server OK. Sessions: ${sessions.size}, Clients: ${clients.size}`);
 });
