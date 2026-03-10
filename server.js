@@ -5,6 +5,24 @@ const PORT = process.env.PORT || 3000;
 const LEGACY_INVITE = '__legacy__';
 
 const server = http.createServer((req, res) => {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+
+  if (url.pathname === '/sessions') {
+    const list = [];
+    for (const [code, s] of sessions) {
+      if (code === LEGACY_INVITE) continue;
+      list.push({
+        id: s.id,
+        inviteCode: code,
+        players: s.players.size,
+        linkPermission: s.linkPermission
+      });
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ sessions: list }));
+    return;
+  }
+
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end(`Multiplayer server OK. Sessions: ${sessions.size}, Clients: ${clients.size}`);
 });
