@@ -125,7 +125,7 @@ function getOrCreateLegacySession(ws, client) {
   const player = {
     playerId: client.playerId, userId: null,
     userName: `Player ${client.playerId}`, role: 'owner',
-    position: { x: 0, y: 0, z: 0 }, rotation: { y: 0 }, ws
+    position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, ws
   };
   session.players.set(client.playerId, player);
   client.sessionId = session.id;
@@ -178,7 +178,7 @@ function handleCreateSession(ws, client, msg) {
   const player = {
     playerId: client.playerId, userId: msg.userId || null,
     userName: msg.userName || 'Owner', role: 'owner',
-    position: { x: 0, y: 0, z: 0 }, rotation: { y: 0 }, ws
+    position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, ws
   };
 
   const session = {
@@ -213,7 +213,7 @@ function handleJoinSession(ws, client, msg) {
   const player = {
     playerId: client.playerId, userId: msg.userId || null,
     userName: msg.userName || 'Guest', role,
-    position: { x: 0, y: 0, z: 0 }, rotation: { y: 0 }, ws
+    position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, ws
   };
 
   session.players.set(client.playerId, player);
@@ -296,25 +296,25 @@ function handlePointer(ws, client, msg) {
   });
 }
 
-function handleFurnitureMove(ws, client, msg) {
+function handleFurnitureUpdate(ws, client, msg) {
   const session = getSession(ws, client, true);
   if (!session) return;
   const role = session.players.get(client.playerId)?.role;
   if (!canEdit(role)) {
-    log('Denied', `player=${client.playerId} furniture_move (role: ${role})`);
+    log('Denied', `player=${client.playerId} furniture_update (role: ${role})`);
     return;
   }
   if (msg.committed) session.sequenceNumber++;
 
   const n = broadcastToSession(session, ws, {
-    type: 'furniture_move', playerId: client.playerId,
+    type: 'furniture_update', playerId: client.playerId,
     furnitureId: msg.furnitureId, position: msg.position,
-    rotation: msg.rotation, planeOffset: msg.planeOffset,
-    committed: msg.committed
+    rotation: msg.rotation, scale: msg.scale,
+    planeOffset: msg.planeOffset, committed: msg.committed
   });
 
   if (msg.committed)
-    log('Furniture', `move committed "${msg.furnitureId}" by player=${client.playerId} → ${n} peers (seq: ${session.sequenceNumber})`);
+    log('Furniture', `update committed "${msg.furnitureId}" by player=${client.playerId} → ${n} peers (seq: ${session.sequenceNumber})`);
 }
 
 function handleFurnitureAdd(ws, client, msg) {
@@ -330,7 +330,7 @@ function handleFurnitureAdd(ws, client, msg) {
   const n = broadcastToSession(session, ws, {
     type: 'furniture_add', playerId: client.playerId,
     furnitureId: msg.furnitureId, variationPath: msg.variationPath,
-    position: msg.position, rotation: msg.rotation,
+    position: msg.position, rotation: msg.rotation, scale: msg.scale,
     planeOffset: msg.planeOffset, parentId: msg.parentId
   });
 
@@ -450,7 +450,7 @@ wss.on('connection', (ws) => {
       case 'leave_session':  leaveSession(ws, client); break;
       case 'move':           handleMove(ws, client, msg); break;
       case 'pointer':        handlePointer(ws, client, msg); break;
-      case 'furniture_move': handleFurnitureMove(ws, client, msg); break;
+      case 'furniture_update': handleFurnitureUpdate(ws, client, msg); break;
       case 'furniture_add':  handleFurnitureAdd(ws, client, msg); break;
       case 'furniture_remove': handleFurnitureRemove(ws, client, msg); break;
       case 'furniture_change_variation': handleFurnitureChangeVariation(ws, client, msg); break;
