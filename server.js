@@ -68,6 +68,19 @@ function generateCode() {
   return code;
 }
 
+function fmtPos(p) {
+  return p ? `(${p.x?.toFixed(2)},${p.y?.toFixed(2)},${p.z?.toFixed(2)})` : '?';
+}
+
+function fmtChanged(mask) {
+  const parts = [];
+  if (mask & PROP_POSITION)     parts.push('pos');
+  if (mask & PROP_ROTATION)     parts.push('rot');
+  if (mask & PROP_SCALE)        parts.push('scl');
+  if (mask & PROP_PLANE_OFFSET) parts.push('off');
+  return parts.join('+') || 'none';
+}
+
 function send(ws, obj) {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
@@ -344,13 +357,20 @@ function handleFurnitureUpdate(ws, client, msg) {
   if (changed & PROP_SCALE)        { if (lwwMerge(entity, 'scale', msg.scale, ts)) wins |= PROP_SCALE; }
   if (changed & PROP_PLANE_OFFSET) { if (lwwMerge(entity, 'planeOffset', msg.planeOffset, ts)) wins |= PROP_PLANE_OFFSET; }
 
+  const fid = msg.furnitureId?.slice(-6) || '?';
+  const c = msg.committed ? 'C' : 'D'; // Committed / Drag
+  log('⬇ FU', `p${client.playerId} ${fid} ${c} chg=${fmtChanged(changed)} pos=${fmtPos(msg.position)} wins=${fmtChanged(wins)}`);
+
   // If nothing won and not committed, skip broadcast
-  if (wins === 0 && !msg.committed) return;
+  if (wins === 0 && !msg.committed) {
+    log('⬇ FU', `p${client.playerId} ${fid} SKIP (no wins)`);
+    return;
+  }
 
   if (msg.committed) session.sequenceNumber++;
 
   // Broadcast merged state (all properties from server-side entity state)
-  const n = broadcastToSession(session, ws, {
+  const merged = {
     type: 'furniture_update', playerId: client.playerId,
     furnitureId: msg.furnitureId,
     position: entity.position?.v || msg.position,
@@ -358,10 +378,10 @@ function handleFurnitureUpdate(ws, client, msg) {
     scale: entity.scale?.v || msg.scale,
     planeOffset: entity.planeOffset?.v ?? msg.planeOffset,
     committed: msg.committed
-  });
+  };
+  const n = broadcastToSession(session, ws, merged);
 
-  if (msg.committed)
-    log('Furniture', `update committed "${msg.furnitureId}" by player=${client.playerId} → ${n} peers (seq: ${session.sequenceNumber}, wins: ${wins})`);
+  log('⬆ FU', `p${client.playerId} ${fid} ${c} → ${n} peers pos=${fmtPos(merged.position)}`);
 }
 
 function handleFurnitureAdd(ws, client, msg) {
@@ -572,6 +592,13 @@ wss.on('connection', (ws) => {
     }
 
     const client = clients.get(ws);
+
+    // Compact incoming log (skip noisy move/pointer)
+    if (msg.type !== 'move' && msg.type !== 'pointer') {
+      const fid = (msg.furnitureId || msg.targetId || '').slice(-6);
+      const extra = fid ? ` id=..${fid}` : '';
+      log('⬇ IN', `p${client.playerId} ${msg.type}${extra}${msg.committed ? ' COMMIT' : ''}`);
+    }
 
     switch (msg.type) {
       case 'create_session': handleCreateSession(ws, client, msg); break;
