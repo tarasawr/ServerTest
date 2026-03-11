@@ -103,6 +103,29 @@ function sessionInfo(session) {
   return `${session.id} (players: ${session.players.size}, seq: ${session.sequenceNumber})`;
 }
 
+// --- Per-property LWW (Last-Writer-Wins) ---
+
+const PROP_POSITION     = 1;
+const PROP_ROTATION     = 2;
+const PROP_SCALE        = 4;
+const PROP_PLANE_OFFSET = 8;
+const PROP_ALL          = 15;
+
+function getEntityState(session, entityId) {
+  if (!session.entityState) session.entityState = new Map();
+  if (!session.entityState.has(entityId)) session.entityState.set(entityId, {});
+  return session.entityState.get(entityId);
+}
+
+function lwwMerge(entity, prop, value, timestamp) {
+  const current = entity[prop];
+  if (!current || timestamp >= current.ts) {
+    entity[prop] = { v: value, ts: timestamp };
+    return true;
+  }
+  return false;
+}
+
 // --- Legacy: auto-create/join default session for clients that skip create_session ---
 
 function getOrCreateLegacySession(ws, client) {
@@ -116,7 +139,8 @@ function getOrCreateLegacySession(ws, client) {
       projectXml: '',
       linkPermission: 'edit',
       sequenceNumber: 0,
-      players: new Map()
+      players: new Map(),
+      entityState: new Map()
     };
     sessions.set(LEGACY_INVITE, session);
     log('Legacy', 'Session created');
@@ -185,7 +209,8 @@ function handleCreateSession(ws, client, msg) {
     id: sessionId, inviteCode, ownerId: client.playerId,
     ownerUserId: msg.userId || null, projectXml: msg.projectXml || '',
     linkPermission, sequenceNumber: 0,
-    players: new Map([[client.playerId, player]])
+    players: new Map([[client.playerId, player]]),
+    entityState: new Map()
   };
 
   sessions.set(inviteCode, session);
@@ -248,6 +273,9 @@ function leaveSession(ws, client) {
   client.sessionId = null;
   if (!session) return;
 
+  // Release all locks held by this player
+  releasePlayerLocks(session, client.playerId, ws);
+
   session.players.delete(client.playerId);
 
   if (client.playerId === session.ownerId) {
@@ -304,17 +332,43 @@ function handleFurnitureUpdate(ws, client, msg) {
     log('Denied', `player=${client.playerId} furniture_update (role: ${role})`);
     return;
   }
+
+  const ts = Date.now();
+  const changed = msg.changed || PROP_ALL;
+  const entity = getEntityState(session, msg.furnitureId);
+
+  // Per-property LWW merge
+  let wins = 0;
+  if (changed & PROP_POSITION)     { if (lwwMerge(entity, 'position', msg.position, ts)) wins |= PROP_POSITION; }
+  if (changed & PROP_ROTATION)     { if (lwwMerge(entity, 'rotation', msg.rotation, ts)) wins |= PROP_ROTATION; }
+  if (changed & PROP_SCALE)        { if (lwwMerge(entity, 'scale', msg.scale, ts)) wins |= PROP_SCALE; }
+  if (changed & PROP_PLANE_OFFSET) { if (lwwMerge(entity, 'planeOffset', msg.planeOffset, ts)) wins |= PROP_PLANE_OFFSET; }
+
+  // If nothing won and not committed, skip broadcast
+  if (wins === 0 && !msg.committed) return;
+
   if (msg.committed) session.sequenceNumber++;
 
+  // Broadcast merged state (all properties from server-side entity state)
   const n = broadcastToSession(session, ws, {
     type: 'furniture_update', playerId: client.playerId,
-    furnitureId: msg.furnitureId, position: msg.position,
-    rotation: msg.rotation, scale: msg.scale,
-    planeOffset: msg.planeOffset, committed: msg.committed
+    furnitureId: msg.furnitureId,
+    position: entity.position?.v || msg.position,
+    rotation: entity.rotation?.v || msg.rotation,
+    scale: entity.scale?.v || msg.scale,
+    planeOffset: entity.planeOffset?.v ?? msg.planeOffset,
+    committed: msg.committed
   });
 
-  if (msg.committed)
-    log('Furniture', `update committed "${msg.furnitureId}" by player=${client.playerId} → ${n} peers (seq: ${session.sequenceNumber})`);
+  if (msg.committed) {
+    // Auto-release lock on commit
+    if (session.locks && session.locks.get(msg.furnitureId) === client.playerId) {
+      session.locks.delete(msg.furnitureId);
+      broadcastToSession(session, ws, { type: 'furniture_unlocked', furnitureId: msg.furnitureId });
+      log('Lock', `auto-released "${msg.furnitureId}" on commit by player=${client.playerId}`);
+    }
+    log('Furniture', `update committed "${msg.furnitureId}" by player=${client.playerId} → ${n} peers (seq: ${session.sequenceNumber}, wins: ${wins})`);
+  }
 }
 
 function handleFurnitureAdd(ws, client, msg) {
@@ -347,6 +401,12 @@ function handleFurnitureRemove(ws, client, msg) {
   }
   session.sequenceNumber++;
 
+  // Clean up LWW entity state
+  if (session.entityState) {
+    session.entityState.delete(msg.furnitureId);
+    session.entityState.delete(`var:${msg.furnitureId}`);
+  }
+
   const n = broadcastToSession(session, ws, {
     type: 'furniture_remove', playerId: client.playerId,
     furnitureId: msg.furnitureId
@@ -363,6 +423,15 @@ function handleFurnitureChangeVariation(ws, client, msg) {
     log('Denied', `player=${client.playerId} furniture_change_variation (role: ${role})`);
     return;
   }
+
+  const ts = Date.now();
+  const entity = getEntityState(session, `var:${msg.furnitureId}`);
+
+  if (!lwwMerge(entity, 'variation', msg.variationPath, ts)) {
+    log('Furniture', `change_variation rejected (stale) "${msg.furnitureId}" by player=${client.playerId}`);
+    return;
+  }
+
   session.sequenceNumber++;
 
   const n = broadcastToSession(session, ws, {
@@ -381,6 +450,16 @@ function handleMaterialChange(ws, client, msg) {
     log('Denied', `player=${client.playerId} material_change (role: ${role})`);
     return;
   }
+
+  const ts = Date.now();
+  const entityId = `mat:${msg.targetId}:${msg.targetType}`;
+  const entity = getEntityState(session, entityId);
+
+  if (!lwwMerge(entity, 'material', { path: msg.materialPath, categoryId: msg.categoryId }, ts)) {
+    log('Material', `change rejected (stale) target="${msg.targetId}" by player=${client.playerId}`);
+    return;
+  }
+
   session.sequenceNumber++;
 
   const n = broadcastToSession(session, ws, {
@@ -390,6 +469,51 @@ function handleMaterialChange(ws, client, msg) {
   });
 
   log('Material', `change target="${msg.targetId}" type="${msg.targetType}" by player=${client.playerId} → ${n} peers`);
+}
+
+// --- Furniture locking ---
+
+function handleFurnitureLock(ws, client, msg) {
+  const session = getSession(ws, client, false);
+  if (!session) return;
+  const role = session.players.get(client.playerId)?.role;
+  if (!canEdit(role)) {
+    log('Denied', `player=${client.playerId} furniture_lock (role: ${role})`);
+    return;
+  }
+
+  if (!session.locks) session.locks = new Map();
+
+  const existing = session.locks.get(msg.furnitureId);
+  if (existing && existing !== client.playerId) {
+    // Already locked by another player
+    send(ws, { type: 'furniture_lock_denied', furnitureId: msg.furnitureId, lockedBy: existing });
+    log('Lock', `denied "${msg.furnitureId}" for player=${client.playerId} (held by ${existing})`);
+    return;
+  }
+
+  // Grant lock
+  session.locks.set(msg.furnitureId, client.playerId);
+
+  // Notify all OTHER players
+  broadcastToSession(session, ws, {
+    type: 'furniture_locked', furnitureId: msg.furnitureId, playerId: client.playerId
+  });
+
+  log('Lock', `granted "${msg.furnitureId}" to player=${client.playerId}`);
+}
+
+function releasePlayerLocks(session, playerId, excludeWs) {
+  if (!session.locks) return;
+  const toRelease = [];
+  for (const [fid, pid] of session.locks) {
+    if (pid === playerId) toRelease.push(fid);
+  }
+  for (const fid of toRelease) {
+    session.locks.delete(fid);
+    broadcastToSession(session, excludeWs, { type: 'furniture_unlocked', furnitureId: fid });
+    log('Lock', `released "${fid}" (was player=${playerId})`);
+  }
 }
 
 function handleUpdateState(ws, client, msg) {
@@ -455,6 +579,7 @@ wss.on('connection', (ws) => {
       case 'furniture_remove': handleFurnitureRemove(ws, client, msg); break;
       case 'furniture_change_variation': handleFurnitureChangeVariation(ws, client, msg); break;
       case 'material_change': handleMaterialChange(ws, client, msg); break;
+      case 'furniture_lock': handleFurnitureLock(ws, client, msg); break;
       case 'update_state':   handleUpdateState(ws, client, msg); break;
       case 'link_permission_change': handleLinkPermissionChange(ws, client, msg); break;
       default:
