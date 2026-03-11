@@ -360,15 +360,8 @@ function handleFurnitureUpdate(ws, client, msg) {
     committed: msg.committed
   });
 
-  if (msg.committed) {
-    // Auto-release lock on commit
-    if (session.locks && session.locks.get(msg.furnitureId) === client.playerId) {
-      session.locks.delete(msg.furnitureId);
-      broadcastToSession(session, ws, { type: 'furniture_unlocked', furnitureId: msg.furnitureId });
-      log('Lock', `auto-released "${msg.furnitureId}" on commit by player=${client.playerId}`);
-    }
+  if (msg.committed)
     log('Furniture', `update committed "${msg.furnitureId}" by player=${client.playerId} → ${n} peers (seq: ${session.sequenceNumber}, wins: ${wins})`);
-  }
 }
 
 function handleFurnitureAdd(ws, client, msg) {
@@ -503,6 +496,18 @@ function handleFurnitureLock(ws, client, msg) {
   log('Lock', `granted "${msg.furnitureId}" to player=${client.playerId}`);
 }
 
+function handleFurnitureUnlock(ws, client, msg) {
+  const session = getSession(ws, client, false);
+  if (!session) return;
+
+  if (!session.locks) return;
+  if (session.locks.get(msg.furnitureId) !== client.playerId) return;
+
+  session.locks.delete(msg.furnitureId);
+  broadcastToSession(session, ws, { type: 'furniture_unlocked', furnitureId: msg.furnitureId });
+  log('Lock', `released "${msg.furnitureId}" by player=${client.playerId} (deselected)`);
+}
+
 function releasePlayerLocks(session, playerId, excludeWs) {
   if (!session.locks) return;
   const toRelease = [];
@@ -580,6 +585,7 @@ wss.on('connection', (ws) => {
       case 'furniture_change_variation': handleFurnitureChangeVariation(ws, client, msg); break;
       case 'material_change': handleMaterialChange(ws, client, msg); break;
       case 'furniture_lock': handleFurnitureLock(ws, client, msg); break;
+      case 'furniture_unlock': handleFurnitureUnlock(ws, client, msg); break;
       case 'update_state':   handleUpdateState(ws, client, msg); break;
       case 'link_permission_change': handleLinkPermissionChange(ws, client, msg); break;
       default:
