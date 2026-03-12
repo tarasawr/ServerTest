@@ -292,14 +292,25 @@ function leaveSession(ws, client) {
   session.players.delete(client.playerId);
 
   if (client.playerId === session.ownerId) {
-    // Owner left → close session
-    broadcastToSession(session, null, { type: 'session_closed', reason: 'owner_left' });
-    for (const [, p] of session.players) {
-      const c = clients.get(p.ws);
-      if (c) c.sessionId = null;
+    if (session.players.size === 0) {
+      // No players left → delete session
+      sessions.delete(session.inviteCode);
+      log('Session', `${session.id} closed (owner left, no players remaining)`);
+    } else {
+      // Transfer ownership to next player
+      const nextPlayer = session.players.values().next().value;
+      session.ownerId = nextPlayer.playerId;
+      nextPlayer.role = 'owner';
+
+      // Notify all remaining players
+      broadcastToSession(session, null, {
+        type: 'owner_changed',
+        newOwnerId: nextPlayer.playerId,
+        reason: 'owner_left'
+      });
+
+      log('Session', `${session.id} ownership transferred to player ${nextPlayer.playerId} (total: ${session.players.size})`);
     }
-    sessions.delete(session.inviteCode);
-    log('Session', `${session.id} closed (owner left, kicked ${session.players.size} players)`);
   } else {
     broadcastToSession(session, ws, { type: 'player_left', playerId: client.playerId });
     log('Session', `Player ${client.playerId} left ${session.id} (total: ${session.players.size})`);
