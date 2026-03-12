@@ -455,35 +455,43 @@ function handleFurnitureChangeVariation(ws, client, msg) {
   log('Furniture', `change_variation "${msg.furnitureId}" → "${msg.variationPath}" by player=${client.playerId} → ${n} peers`);
 }
 
-function handleMaterialChange(ws, client, msg) {
+function handleDomainChange(ws, client, msg) {
   const session = getSession(ws, client, true);
   if (!session) return;
   const role = session.players.get(client.playerId)?.role;
   if (!canEdit(role)) {
-    log('Denied', `player=${client.playerId} material_change (role: ${role})`);
+    log('Denied', `player=${client.playerId} domain_change (role: ${role})`);
     return;
   }
 
-  const ts = Date.now();
-  const entityId = `mat:${msg.targetId}:${msg.targetType}`;
-  const entity = getEntityState(session, entityId);
+  if (!msg.changes || !msg.changes.length) return;
 
-  if (!lwwMerge(entity, 'material', { path: msg.materialPath, categoryId: msg.categoryId }, ts)) {
-    log('Material', `change rejected (stale) target="${msg.targetId}" by player=${client.playerId}`);
+  const ts = Date.now();
+  const winningChanges = [];
+
+  for (const change of msg.changes) {
+    const entityId = `dom:${msg.targetId}:${change.name}`;
+    const entity = getEntityState(session, entityId);
+    if (lwwMerge(entity, 'value', change.value, ts)) {
+      winningChanges.push(change);
+    }
+  }
+
+  if (winningChanges.length === 0) {
+    log('Domain', `all changes rejected (stale) target="${msg.targetId}" by player=${client.playerId}`);
     return;
   }
 
   session.sequenceNumber++;
 
   const n = broadcastToSession(session, ws, {
-    type: 'material_change', playerId: client.playerId,
-    targetId: msg.targetId, targetType: msg.targetType,
-    materialPath: msg.materialPath, categoryId: msg.categoryId || null,
-    width: msg.width || 0, height: msg.height || 0,
-    colorHex: msg.colorHex || '', bumpPath: msg.bumpPath || ''
+    type: 'domain_change', playerId: client.playerId,
+    targetId: msg.targetId,
+    changes: winningChanges
   });
 
-  log('Material', `change target="${msg.targetId}" type="${msg.targetType}" by player=${client.playerId} → ${n} peers`);
+  const names = winningChanges.map(c => c.name).join(',');
+  log('Domain', `change target="${msg.targetId}" props=[${names}] by player=${client.playerId} → ${n} peers`);
 }
 
 // --- Furniture locking ---
@@ -612,7 +620,7 @@ wss.on('connection', (ws) => {
       case 'furniture_add':  handleFurnitureAdd(ws, client, msg); break;
       case 'furniture_remove': handleFurnitureRemove(ws, client, msg); break;
       case 'furniture_change_variation': handleFurnitureChangeVariation(ws, client, msg); break;
-      case 'material_change': handleMaterialChange(ws, client, msg); break;
+      case 'domain_change': handleDomainChange(ws, client, msg); break;
       case 'furniture_lock': handleFurnitureLock(ws, client, msg); break;
       case 'furniture_unlock': handleFurnitureUnlock(ws, client, msg); break;
       case 'update_state':   handleUpdateState(ws, client, msg); break;
