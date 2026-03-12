@@ -82,7 +82,7 @@ function fmtChanged(mask) {
 }
 
 function send(ws, obj) {
-  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+  if (ws.readyState === WebSocket.OPEN) sendPossiblyChunked(ws, obj);
 }
 
 function sendError(ws, code, message) {
@@ -554,6 +554,57 @@ function handleLinkPermissionChange(ws, client, msg) {
   log('Session', `${session.id} link permission → ${permission} by player=${client.playerId} → ${n} peers`);
 }
 
+// --- Chunk assembly per connection ---
+const chunkBuffers = new Map(); // ws → Map<messageId, { chunks: string[], received: number, total: number }>
+
+function handleChunk(ws, msg) {
+  if (!chunkBuffers.has(ws)) chunkBuffers.set(ws, new Map());
+  const buf = chunkBuffers.get(ws);
+
+  const { messageId, index, total, data } = msg;
+  if (!messageId || total <= 0 || index < 0 || index >= total) return null;
+
+  if (!buf.has(messageId)) {
+    buf.set(messageId, { chunks: new Array(total).fill(null), received: 0, total });
+  }
+  const entry = buf.get(messageId);
+  if (entry.chunks[index] === null) {
+    entry.chunks[index] = data;
+    entry.received++;
+  }
+
+  if (entry.received < entry.total) return null; // still waiting
+
+  const full = entry.chunks.join('');
+  buf.delete(messageId);
+  const pid = clients.get(ws)?.playerId ?? '?';
+  log('Chunk', `Reassembled ${total} chunks (${full.length} chars) from player=${pid} id=${messageId}`);
+  return full;
+}
+
+function cleanupChunkBuffers(ws) {
+  chunkBuffers.delete(ws);
+}
+
+// --- Chunk sending (server → client) ---
+const MAX_CHUNK_SIZE = 48 * 1024;
+let serverChunkId = 0;
+
+function sendPossiblyChunked(ws, obj) {
+  const json = JSON.stringify(obj);
+  if (json.length <= MAX_CHUNK_SIZE) {
+    ws.send(json);
+    return;
+  }
+  const messageId = String(++serverChunkId);
+  const total = Math.ceil(json.length / MAX_CHUNK_SIZE);
+  for (let i = 0; i < total; i++) {
+    const chunk = json.slice(i * MAX_CHUNK_SIZE, (i + 1) * MAX_CHUNK_SIZE);
+    ws.send(JSON.stringify({ type: 'chunk', messageId, index: i, total, data: chunk }));
+  }
+  log('Chunk', `Sent ${total} chunks (${json.length} chars) id=${messageId}`);
+}
+
 // --- Connection ---
 
 wss.on('connection', (ws) => {
@@ -572,6 +623,17 @@ wss.on('connection', (ws) => {
       log('Error', `Player ${clients.get(ws)?.playerId} sent message without type`);
       sendError(ws, 'INVALID_MESSAGE', 'Missing type');
       return;
+    }
+
+    // Handle chunk assembly
+    if (msg.type === 'chunk') {
+      const fullJson = handleChunk(ws, msg);
+      if (!fullJson) return; // waiting for more chunks
+      try { msg = JSON.parse(fullJson); } catch (e) {
+        log('Error', `Player ${clients.get(ws)?.playerId} reassembled chunk is invalid JSON`);
+        return;
+      }
+      if (!msg.type) return;
     }
 
     const client = clients.get(ws);
@@ -608,6 +670,7 @@ wss.on('connection', (ws) => {
     const client = clients.get(ws);
     if (client?.sessionId) leaveSession(ws, client);
     clients.delete(ws);
+    cleanupChunkBuffers(ws);
     log('Disconnect', `Player ${client?.playerId} disconnected (total: ${clients.size})`);
   });
 
