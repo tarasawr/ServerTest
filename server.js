@@ -428,33 +428,6 @@ function handleFurnitureRemove(ws, client, msg) {
   log('Furniture', `remove "${msg.furnitureId}" by player=${client.playerId} → ${n} peers (seq: ${session.sequenceNumber})`);
 }
 
-function handleFurnitureChangeVariation(ws, client, msg) {
-  const session = getSession(ws, client, true);
-  if (!session) return;
-  const role = session.players.get(client.playerId)?.role;
-  if (!canEdit(role)) {
-    log('Denied', `player=${client.playerId} furniture_change_variation (role: ${role})`);
-    return;
-  }
-
-  const ts = Date.now();
-  const entity = getEntityState(session, `var:${msg.furnitureId}`);
-
-  if (!lwwMerge(entity, 'variation', msg.variationPath, ts)) {
-    log('Furniture', `change_variation rejected (stale) "${msg.furnitureId}" by player=${client.playerId}`);
-    return;
-  }
-
-  session.sequenceNumber++;
-
-  const n = broadcastToSession(session, ws, {
-    type: 'furniture_change_variation', playerId: client.playerId,
-    furnitureId: msg.furnitureId, variationPath: msg.variationPath
-  });
-
-  log('Furniture', `change_variation "${msg.furnitureId}" → "${msg.variationPath}" by player=${client.playerId} → ${n} peers`);
-}
-
 function handleDomainChange(ws, client, msg) {
   const session = getSession(ws, client, true);
   if (!session) return;
