@@ -478,7 +478,9 @@ function handleMaterialChange(ws, client, msg) {
   const n = broadcastToSession(session, ws, {
     type: 'material_change', playerId: client.playerId,
     targetId: msg.targetId, targetType: msg.targetType,
-    materialPath: msg.materialPath, categoryId: msg.categoryId || null
+    materialPath: msg.materialPath, categoryId: msg.categoryId || null,
+    width: msg.width || 0, height: msg.height || 0,
+    colorHex: msg.colorHex || '', bumpPath: msg.bumpPath || ''
   });
 
   log('Material', `change target="${msg.targetId}" type="${msg.targetType}" by player=${client.playerId} → ${n} peers`);
