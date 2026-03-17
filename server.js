@@ -109,7 +109,7 @@ function broadcastToSession(session, excludeWs, obj) {
 }
 
 function canEdit(role) {
-  return role === 'owner' || role === 'co-author' || role === 'guest-edit';
+  return role === 'owner' || role === 'editor';
 }
 
 function sessionInfo(session) {
@@ -245,7 +245,7 @@ function handleJoinSession(ws, client, msg) {
   if (session.linkPermission === 'none') { sendError(ws, 'NO_ACCESS', 'Link disabled'); return; }
   if (session.players.size >= 25) { sendError(ws, 'SESSION_FULL', 'Max 25 players'); return; }
 
-  let role = session.linkPermission === 'edit' ? 'guest-edit' : 'guest-view';
+  let role = session.linkPermission === 'edit' ? 'editor' : 'viewer';
   if (msg.userId && msg.userId === session.ownerUserId) role = 'owner';
 
   const player = {
@@ -480,6 +480,16 @@ function handleDomainChange(ws, client, msg) {
 
 // --- Furniture locking ---
 
+// Lock key format: "furnitureId:property" (per-property locking)
+function lockKey(furnitureId, property) {
+  return `${furnitureId}:${property || 'position'}`;
+}
+
+function parseLockKey(key) {
+  const i = key.indexOf(':');
+  return { furnitureId: key.slice(0, i), property: key.slice(i + 1) };
+}
+
 function handleFurnitureLock(ws, client, msg) {
   const session = getSession(ws, client, false);
   if (!session) return;
@@ -491,23 +501,25 @@ function handleFurnitureLock(ws, client, msg) {
 
   if (!session.locks) session.locks = new Map();
 
-  const existing = session.locks.get(msg.furnitureId);
+  const key = lockKey(msg.furnitureId, msg.property);
+  const existing = session.locks.get(key);
   if (existing && existing !== client.playerId) {
-    // Already locked by another player
-    send(ws, { type: 'furniture_lock_denied', furnitureId: msg.furnitureId, lockedBy: existing });
-    log('Lock', `denied "${msg.furnitureId}" for player=${client.playerId} (held by ${existing})`);
+    send(ws, {
+      type: 'furniture_lock_denied', furnitureId: msg.furnitureId,
+      property: msg.property || 'position', lockedBy: existing
+    });
+    log('Lock', `denied "${msg.furnitureId}.${msg.property}" for player=${client.playerId} (held by ${existing})`);
     return;
   }
 
-  // Grant lock
-  session.locks.set(msg.furnitureId, client.playerId);
+  session.locks.set(key, client.playerId);
 
-  // Notify all OTHER players
   broadcastToSession(session, ws, {
-    type: 'furniture_locked', furnitureId: msg.furnitureId, playerId: client.playerId
+    type: 'furniture_locked', furnitureId: msg.furnitureId,
+    property: msg.property || 'position', playerId: client.playerId
   });
 
-  log('Lock', `granted "${msg.furnitureId}" to player=${client.playerId}`);
+  log('Lock', `granted "${msg.furnitureId}.${msg.property}" to player=${client.playerId}`);
 }
 
 function handleFurnitureUnlock(ws, client, msg) {
@@ -515,23 +527,30 @@ function handleFurnitureUnlock(ws, client, msg) {
   if (!session) return;
 
   if (!session.locks) return;
-  if (session.locks.get(msg.furnitureId) !== client.playerId) return;
+  const key = lockKey(msg.furnitureId, msg.property);
+  if (session.locks.get(key) !== client.playerId) return;
 
-  session.locks.delete(msg.furnitureId);
-  broadcastToSession(session, ws, { type: 'furniture_unlocked', furnitureId: msg.furnitureId });
-  log('Lock', `released "${msg.furnitureId}" by player=${client.playerId} (deselected)`);
+  session.locks.delete(key);
+  broadcastToSession(session, ws, {
+    type: 'furniture_unlocked', furnitureId: msg.furnitureId,
+    property: msg.property || 'position'
+  });
+  log('Lock', `released "${msg.furnitureId}.${msg.property}" by player=${client.playerId}`);
 }
 
 function releasePlayerLocks(session, playerId, excludeWs) {
   if (!session.locks) return;
   const toRelease = [];
-  for (const [fid, pid] of session.locks) {
-    if (pid === playerId) toRelease.push(fid);
+  for (const [key, pid] of session.locks) {
+    if (pid === playerId) toRelease.push(key);
   }
-  for (const fid of toRelease) {
-    session.locks.delete(fid);
-    broadcastToSession(session, excludeWs, { type: 'furniture_unlocked', furnitureId: fid });
-    log('Lock', `released "${fid}" (was player=${playerId})`);
+  for (const key of toRelease) {
+    session.locks.delete(key);
+    const { furnitureId, property } = parseLockKey(key);
+    broadcastToSession(session, excludeWs, {
+      type: 'furniture_unlocked', furnitureId, property
+    });
+    log('Lock', `released "${furnitureId}.${property}" (was player=${playerId})`);
   }
 }
 
