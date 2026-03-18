@@ -51,6 +51,31 @@ let nextPlayerId = 1;
 const sessions = new Map();  // inviteCode -> Session
 const clients = new Map();   // WebSocket -> ClientState
 
+// --- Player colors (10 distinct colors from design) ---
+
+const PLAYER_COLORS = [
+  '#8C5CF6', // purple
+  '#F04545', // red
+  '#FAD93D', // yellow
+  '#22C55E', // green
+  '#ED4A99', // magenta
+  '#737D8C', // slate gray
+  '#4285F4', // blue
+  '#F28D28', // orange
+  '#66BAE9', // light blue
+  '#99A626', // olive
+];
+
+function pickColor(session) {
+  const usedColors = new Set();
+  for (const [, p] of session.players) {
+    if (p.color) usedColors.add(p.color);
+  }
+  const available = PLAYER_COLORS.filter(c => !usedColors.has(c));
+  const pool = available.length > 0 ? available : PLAYER_COLORS;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
 // --- Helpers ---
 
 function ts() {
@@ -212,26 +237,31 @@ function handleCreateSession(ws, client, msg) {
   const sessionId = 'sess_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   const linkPermission = msg.linkPermission || 'edit';
 
-  const player = {
-    playerId: client.playerId, userId: msg.userId || null,
-    userName: msg.userName || 'Owner', role: 'owner',
-    position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, ws
-  };
-
+  // Create session first (needed for pickColor)
   const session = {
     id: sessionId, inviteCode, ownerId: client.playerId,
     ownerUserId: msg.userId || null, projectXml: msg.projectXml || '',
     linkPermission, sequenceNumber: 0,
-    players: new Map([[client.playerId, player]]),
+    players: new Map(),
     entityState: new Map()
   };
+
+  const player = {
+    playerId: client.playerId, userId: msg.userId || null,
+    userName: msg.userName || 'Owner', role: 'owner',
+    color: pickColor(session),
+    position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, ws
+  };
+
+  session.players.set(client.playerId, player);
 
   sessions.set(inviteCode, session);
   client.sessionId = sessionId;
 
   send(ws, {
     type: 'session_created', inviteCode, sessionId,
-    sequenceNumber: 0, playerId: client.playerId
+    sequenceNumber: 0, playerId: client.playerId,
+    color: player.color
   });
 
   log('Session', `Created ${sessionId} (invite: ${inviteCode}, permission: ${linkPermission}) by player ${client.playerId}`);
@@ -251,6 +281,7 @@ function handleJoinSession(ws, client, msg) {
   const player = {
     playerId: client.playerId, userId: msg.userId || null,
     userName: msg.userName || 'Guest', role,
+    color: pickColor(session),
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, ws
   };
 
@@ -261,7 +292,7 @@ function handleJoinSession(ws, client, msg) {
   for (const [, p] of session.players) {
     presence.push({
       playerId: p.playerId, userId: p.userId, userName: p.userName,
-      role: p.role, position: p.position, rotation: p.rotation
+      role: p.role, color: p.color, position: p.position, rotation: p.rotation
     });
   }
 
@@ -274,6 +305,7 @@ function handleJoinSession(ws, client, msg) {
   broadcastToSession(session, ws, {
     type: 'player_joined', playerId: client.playerId,
     userId: player.userId, userName: player.userName, role,
+    color: player.color,
     position: player.position, rotation: player.rotation
   });
 
