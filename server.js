@@ -248,7 +248,7 @@ function handleCreateSession(ws, client, msg) {
 
   const player = {
     playerId: client.playerId, userId: msg.userId || null,
-    userName: msg.userName || 'Owner', role: 'owner',
+    userName: msg.userName || `Player ${client.playerId}`, role: 'owner',
     color: pickColor(session),
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, ws
   };
@@ -280,7 +280,7 @@ function handleJoinSession(ws, client, msg) {
 
   const player = {
     playerId: client.playerId, userId: msg.userId || null,
-    userName: msg.userName || 'Guest', role,
+    userName: msg.userName || `Player ${client.playerId}`, role,
     color: pickColor(session),
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, ws
   };
