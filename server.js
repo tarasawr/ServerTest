@@ -3,6 +3,7 @@ const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 3000;
 const LEGACY_INVITE = '__legacy__';
+const BOT_COUNT = 3; // bots auto-spawned per session (0 to disable)
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -265,6 +266,9 @@ function handleCreateSession(ws, client, msg) {
   });
 
   log('Session', `Created ${sessionId} (invite: ${inviteCode}, permission: ${linkPermission}) by player ${client.playerId}`);
+
+  // Auto-spawn bots after owner has time to load and send position
+  setTimeout(() => spawnSessionBots(inviteCode, session.projectXml), 5000);
 }
 
 function handleJoinSession(ws, client, msg) {
@@ -760,7 +764,204 @@ wss.on('connection', (ws) => {
   });
 });
 
+// --- Inline bots ---
+
+const BOT_NAMES = ['Luna', 'Ricardo', 'Emma', 'Mark', 'Daniel', 'Sophia', 'Alex', 'Mia', 'Leo', 'Zara'];
+const BOT_MOVE_INTERVAL = 200;
+const BOT_WALK_SPEED = 0.2;          // ~1 unit/sec at 200ms interval (matches WASD speed)
+const BOT_DIR_CHANGE = 0.03;
+const BOT_PAUSE_CHANCE = 0.01;
+const BOT_PAUSE_TICKS = 15;
+const BOT_LOOK_SPEED = 4;
+const BOT_ROOM_CHANGE = 0.005;
+const BOT_WALL_MARGIN = 0.4;
+
+function parseRoomsFromXml(xml) {
+  const rooms = [];
+  const floorRe = /<Floor[^>]*>[\s\S]*?<Shape>([\s\S]*?)<\/Shape>/g;
+  let m;
+  while ((m = floorRe.exec(xml)) !== null) {
+    const verts = [];
+    const vRe = /<Vector2\s+x="([^"]+)"\s+y="([^"]+)"/g;
+    let v;
+    while ((v = vRe.exec(m[1])) !== null) {
+      verts.push({ x: parseFloat(v[1]), z: parseFloat(v[2]) });
+    }
+    if (verts.length >= 3) rooms.push(verts);
+  }
+  return rooms;
+}
+
+function ptInPoly(px, pz, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x, zi = poly[i].z, xj = poly[j].x, zj = poly[j].z;
+    if ((zi > pz) !== (zj > pz) && px < (xj - xi) * (pz - zi) / (zj - zi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+function polyArea(poly) {
+  let area = 0;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    area += (poly[j].x + poly[i].x) * (poly[j].z - poly[i].z);
+  }
+  return Math.abs(area / 2);
+}
+
+function polyCenter(poly) {
+  let cx = 0, cz = 0;
+  for (const v of poly) { cx += v.x; cz += v.z; }
+  return { x: cx / poly.length, z: cz / poly.length };
+}
+
+function randInPoly(poly) {
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const v of poly) { minX = Math.min(minX, v.x); maxX = Math.max(maxX, v.x); minZ = Math.min(minZ, v.z); maxZ = Math.max(maxZ, v.z); }
+  for (let i = 0; i < 100; i++) {
+    const px = minX + Math.random() * (maxX - minX), pz = minZ + Math.random() * (maxZ - minZ);
+    if (isInsideWithMargin(px, pz, poly, BOT_WALL_MARGIN)) return { x: px, z: pz };
+  }
+  return polyCenter(poly);
+}
+
+/** Check if point is at least `margin` away from all polygon edges. */
+function isInsideWithMargin(px, pz, poly, margin) {
+  if (!ptInPoly(px, pz, poly)) return false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const ax = poly[j].x, az = poly[j].z;
+    const bx = poly[i].x, bz = poly[i].z;
+    const dx = bx - ax, dz = bz - az;
+    const len2 = dx * dx + dz * dz;
+    if (len2 === 0) continue;
+    let t = ((px - ax) * dx + (pz - az) * dz) / len2;
+    t = Math.max(0, Math.min(1, t));
+    const cx = ax + t * dx, cz = az + t * dz;
+    const dist = Math.sqrt((px - cx) * (px - cx) + (pz - cz) * (pz - cz));
+    if (dist < margin) return false;
+  }
+  return true;
+}
+
+function spawnSessionBots(inviteCode, projectXml) {
+  if (BOT_COUNT <= 0) return;
+
+  const rooms = parseRoomsFromXml(projectXml || '');
+  log('Bots', `Parsed ${rooms.length} room(s), spawning ${BOT_COUNT} bots for invite: ${inviteCode}`);
+  for (let r = 0; r < rooms.length; r++) {
+    const c = polyCenter(rooms[r]);
+    const verts = rooms[r].map(v => `(${v.x.toFixed(2)},${v.z.toFixed(2)})`).join(' ');
+    log('Bots', `  Room ${r}: center=(${c.x.toFixed(2)},${c.z.toFixed(2)}) verts=[${verts}]`);
+  }
+
+  for (let i = 0; i < BOT_COUNT; i++) {
+    setTimeout(() => {
+      const botWs = new WebSocket(`ws://localhost:${PORT}`);
+      const name = BOT_NAMES[i % BOT_NAMES.length];
+      // Default to smallest room (skip outer boundary)
+      let currentRoom = null;
+      if (rooms.length > 0) {
+        let minArea = Infinity;
+        for (const r of rooms) {
+          const a = polyArea(r);
+          if (a < minArea) { minArea = a; currentRoom = r; }
+        }
+      }
+
+      let x = 0, z = 0, y = 0;
+      let dirX = (Math.random() - 0.5) * 2, dirZ = (Math.random() - 0.5) * 2;
+      let len = Math.sqrt(dirX * dirX + dirZ * dirZ) || 1; dirX /= len; dirZ /= len;
+      let rotY = Math.random() * 360;
+      let paused = false, pauseTicks = 0, lookDir = 1;
+      let timer = null;
+
+      botWs.on('open', () => {
+        botWs.send(JSON.stringify({ type: 'join_session', inviteCode, userName: name }));
+      });
+
+      botWs.on('message', (raw) => {
+        let msg; try { msg = JSON.parse(raw); } catch { return; }
+        if (msg.type === 'session_state') {
+          // Spawn at owner's position
+          const owner = (msg.presence || []).find(p => p.role === 'owner');
+          if (owner && owner.position) {
+            x = owner.position.x || 0;
+            y = owner.position.y || 0;
+            z = owner.position.z || 0;
+          }
+          // Find the smallest room containing the owner (skip outer boundary)
+          if (rooms.length > 0) {
+            let bestRoom = null;
+            let bestArea = Infinity;
+            for (const r of rooms) {
+              if (ptInPoly(x, z, r)) {
+                const area = polyArea(r);
+                if (area < bestArea) { bestArea = area; bestRoom = r; }
+              }
+            }
+            if (bestRoom) currentRoom = bestRoom;
+          }
+          // Make sure bot starts inside room
+          if (currentRoom && !isInsideWithMargin(x, z, currentRoom, BOT_WALL_MARGIN)) {
+            const p = randInPoly(currentRoom);
+            x = p.x; z = p.z;
+          }
+          const inRoom = currentRoom ? ptInPoly(x, z, currentRoom) : 'no-room';
+          log('Bots', `${name} joined as player ${msg.playerId} at (${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)}) inRoom=${inRoom}`);
+          timer = setInterval(() => {
+            if (botWs.readyState !== WebSocket.OPEN) { clearInterval(timer); return; }
+
+            // Pause / look around
+            if (!paused && Math.random() < BOT_PAUSE_CHANCE) {
+              paused = true;
+              pauseTicks = BOT_PAUSE_TICKS + Math.floor(Math.random() * BOT_PAUSE_TICKS);
+              lookDir = Math.random() < 0.5 ? 1 : -1;
+            }
+
+            if (paused) {
+              rotY += BOT_LOOK_SPEED * lookDir;
+              if (Math.random() < 0.08) lookDir *= -1;
+              pauseTicks--;
+              if (pauseTicks <= 0) paused = false;
+            } else {
+              // Switch rooms
+              if (rooms.length > 1 && Math.random() < BOT_ROOM_CHANGE) {
+                currentRoom = rooms[Math.floor(Math.random() * rooms.length)];
+                const p = randInPoly(currentRoom); x = p.x; z = p.z;
+              }
+              // Direction change
+              if (Math.random() < BOT_DIR_CHANGE) {
+                dirX = (Math.random() - 0.5) * 2; dirZ = (Math.random() - 0.5) * 2;
+                len = Math.sqrt(dirX * dirX + dirZ * dirZ) || 1; dirX /= len; dirZ /= len;
+              }
+              const nx = x + dirX * BOT_WALK_SPEED, nz = z + dirZ * BOT_WALK_SPEED;
+              if (currentRoom && isInsideWithMargin(nx, nz, currentRoom, BOT_WALL_MARGIN)) {
+                x = nx; z = nz;
+              } else if (!currentRoom) {
+                x = nx; z = nz;
+                const d = Math.sqrt(x * x + z * z);
+                if (d > 8) { dirX = -x / d; dirZ = -z / d; len = Math.sqrt(dirX * dirX + dirZ * dirZ) || 1; dirX /= len; dirZ /= len; }
+              } else {
+                // Hit wall — pick new random direction, do NOT move
+                dirX = (Math.random() - 0.5) * 2; dirZ = (Math.random() - 0.5) * 2;
+                len = Math.sqrt(dirX * dirX + dirZ * dirZ) || 1; dirX /= len; dirZ /= len;
+              }
+              rotY = Math.atan2(dirX, dirZ) * 180 / Math.PI;
+            }
+
+            botWs.send(JSON.stringify({ type: 'move', position: { x, y, z }, rotation: { x: 0, y: rotY, z: 0 } }));
+          }, BOT_MOVE_INTERVAL);
+        }
+        if (msg.type === 'session_error') log('Bots', `${name} error: ${msg.code}`);
+      });
+
+      botWs.on('close', () => { if (timer) clearInterval(timer); });
+      botWs.on('error', () => {});
+    }, i * 1000);
+  }
+}
+
 server.listen(PORT, () => {
   log('Server', `Multiplayer server running on port ${PORT}`);
-  log('Server', 'Legacy mode: clients auto-join default session on first message');
+  log('Server', `Auto-bots: ${BOT_COUNT} per session`);
 });
