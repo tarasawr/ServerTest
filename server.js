@@ -1,4 +1,5 @@
 const http = require('http');
+const dgram = require('dgram');
 const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 3000;
@@ -960,6 +961,32 @@ function spawnSessionBots(inviteCode, projectXml) {
     }, i * 1000);
   }
 }
+
+// --- UDP Discovery ---
+
+const DISCOVERY_PORT = 3001;
+const DISCOVERY_MSG = 'MULTIPLAYER_DISCOVER';
+const udpDiscovery = dgram.createSocket('udp4');
+
+udpDiscovery.on('message', (msg, rinfo) => {
+  if (msg.toString() === DISCOVERY_MSG) {
+    const response = JSON.stringify({ type: 'MULTIPLAYER_DISCOVER_RESPONSE', wsPort: PORT });
+    udpDiscovery.send(response, rinfo.port, rinfo.address, (err) => {
+      if (err) log('Discovery', `Error responding: ${err.message}`);
+      else log('Discovery', `Responded to ${rinfo.address}:${rinfo.port} (wsPort: ${PORT})`);
+    });
+  }
+});
+
+udpDiscovery.on('error', (err) => {
+  log('Discovery', `UDP error: ${err.message}`);
+});
+
+udpDiscovery.bind(DISCOVERY_PORT, () => {
+  log('Discovery', `UDP discovery listening on port ${DISCOVERY_PORT}`);
+});
+
+// --- Start ---
 
 server.listen(PORT, () => {
   log('Server', `Multiplayer server running on port ${PORT}`);
