@@ -3,7 +3,7 @@ const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 3000;
 const LEGACY_INVITE = '__legacy__';
-const BOT_COUNT = 3; // bots auto-spawned per session (0 to disable)
+const BOT_COUNT = 0; // bots auto-spawned per session (0 to disable)
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
