@@ -197,7 +197,7 @@ function getOrCreateLegacySession(ws, client) {
   const existing = [];
   for (const [, p] of session.players) {
     if (p.playerId !== client.playerId)
-      existing.push({ id: p.playerId, position: p.position, rotation: p.rotation });
+      existing.push({ id: p.playerId, userName: p.userName, color: p.color, position: p.position, rotation: p.rotation });
   }
   send(ws, { type: 'welcome', playerId: client.playerId, players: existing });
 
