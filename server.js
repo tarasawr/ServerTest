@@ -316,6 +316,27 @@ function handleJoinSession(ws, client, msg) {
   log('Session', `Player ${client.playerId} joined ${session.id} as ${role} (total: ${session.players.size})`);
 }
 
+function hasHumanPlayers(session) {
+  for (const [, p] of session.players) {
+    const c = clients.get(p.ws);
+    if (c && !c.isBot) return true;
+  }
+  return false;
+}
+
+function kickSessionBots(session) {
+  const botsToKick = [];
+  for (const [, p] of session.players) {
+    const c = clients.get(p.ws);
+    if (c && c.isBot) botsToKick.push(p.ws);
+  }
+  for (const botWs of botsToKick) {
+    botWs.close();
+  }
+  if (botsToKick.length > 0)
+    log('Bots', `Kicked ${botsToKick.length} bots from session ${session.id} (no human players left)`);
+}
+
 function leaveSession(ws, client) {
   if (!client.sessionId) return;
   const session = findSessionById(client.sessionId);
@@ -326,6 +347,12 @@ function leaveSession(ws, client) {
   releasePlayerLocks(session, client.playerId, ws);
 
   session.players.delete(client.playerId);
+
+  // If no human players left, kick all bots
+  if (!client.isBot && session.players.size > 0 && !hasHumanPlayers(session)) {
+    kickSessionBots(session);
+    return;
+  }
 
   if (client.playerId === session.ownerId) {
     if (session.players.size === 0) {
@@ -876,6 +903,8 @@ function spawnSessionBots(inviteCode, projectXml) {
       let timer = null;
 
       botWs.on('open', () => {
+        const botClient = clients.get(botWs);
+        if (botClient) botClient.isBot = true;
         botWs.send(JSON.stringify({ type: 'join_session', inviteCode, userName: name }));
       });
 
