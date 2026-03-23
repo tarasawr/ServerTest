@@ -446,6 +446,16 @@ function handlePointer(ws, client, msg) {
   });
 }
 
+function handleSelection(ws, client, msg) {
+  const session = getSession(ws, client, true);
+  if (!session) return;
+
+  broadcastToSession(session, ws, {
+    type: 'selection', playerId: client.playerId,
+    targetId: msg.targetId, selected: !!msg.selected
+  });
+}
+
 function handleFurnitureUpdate(ws, client, msg) {
   const session = getSession(ws, client, true);
   if (!session) return;
@@ -802,6 +812,7 @@ wss.on('connection', (ws) => {
       case 'furniture_remove': handleFurnitureRemove(ws, client, msg); break;
       case 'furniture_change_variation': handleFurnitureChangeVariation(ws, client, msg); break;
       case 'domain_change': handleDomainChange(ws, client, msg); break;
+      case 'selection':      handleSelection(ws, client, msg); break;
       case 'furniture_lock': handleFurnitureLock(ws, client, msg); break;
       case 'furniture_unlock': handleFurnitureUnlock(ws, client, msg); break;
       case 'update_state':   handleUpdateState(ws, client, msg); break;
