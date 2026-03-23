@@ -352,6 +352,9 @@ function hasHumanPlayers(session) {
 }
 
 function kickSessionBots(session) {
+  // Stop the bot manager for this session
+  stopBotManager(session.inviteCode);
+
   const botsToKick = [];
   for (const [, p] of session.players) {
     const c = clients.get(p.ws);
@@ -902,124 +905,185 @@ function isInsideWithMargin(px, pz, poly, margin) {
   return true;
 }
 
+// Per-session bot manager: randomly connects/disconnects bots to simulate real players
+const BOT_MIN_ONLINE_SEC = 15;   // min time bot stays connected
+const BOT_MAX_ONLINE_SEC = 60;   // max time bot stays connected
+const BOT_MIN_OFFLINE_SEC = 5;   // min time before bot reconnects
+const BOT_MAX_OFFLINE_SEC = 30;  // max time before bot reconnects
+const sessionBotManagers = new Map(); // inviteCode -> BotManager
+
+function randBetween(min, max) { return min + Math.random() * (max - min); }
+
 function spawnSessionBots(inviteCode, projectXml) {
   if (BOT_COUNT <= 0) return;
+  if (sessionBotManagers.has(inviteCode)) return; // already managing
 
   const rooms = parseRoomsFromXml(projectXml || '');
-  log('Bots', `Parsed ${rooms.length} room(s), spawning ${BOT_COUNT} bots for invite: ${inviteCode}`);
-  for (let r = 0; r < rooms.length; r++) {
-    const c = polyCenter(rooms[r]);
-    const verts = rooms[r].map(v => `(${v.x.toFixed(2)},${v.z.toFixed(2)})`).join(' ');
-    log('Bots', `  Room ${r}: center=(${c.x.toFixed(2)},${c.z.toFixed(2)}) verts=[${verts}]`);
+  log('Bots', `Parsed ${rooms.length} room(s), managing ${BOT_COUNT} bot slots for invite: ${inviteCode}`);
+
+  // Capture owner's spawn position (first player's position when bots start)
+  let spawnPos = { x: 0, y: 0, z: 0 };
+  const session = sessions.get(inviteCode);
+  if (session) {
+    for (const [, p] of session.players) {
+      if (!clients.get(p.ws)?.isBot) {
+        spawnPos = { ...p.position };
+        break;
+      }
+    }
   }
+
+  const manager = { slots: [], managerTimer: null, stopped: false };
+  sessionBotManagers.set(inviteCode, manager);
 
   for (let i = 0; i < BOT_COUNT; i++) {
-    setTimeout(() => {
-      const botWs = new WebSocket(`ws://localhost:${PORT}`);
-      const name = BOT_NAMES[i % BOT_NAMES.length];
-      // Default to smallest room (skip outer boundary)
-      let currentRoom = null;
-      if (rooms.length > 0) {
-        let minArea = Infinity;
-        for (const r of rooms) {
-          const a = polyArea(r);
-          if (a < minArea) { minArea = a; currentRoom = r; }
-        }
-      }
-
-      let x = 0, z = 0, y = 0;
-      let dirX = (Math.random() - 0.5) * 2, dirZ = (Math.random() - 0.5) * 2;
-      let len = Math.sqrt(dirX * dirX + dirZ * dirZ) || 1; dirX /= len; dirZ /= len;
-      let rotY = Math.random() * 360;
-      let paused = false, pauseTicks = 0, lookDir = 1;
-      let timer = null;
-
-      botWs.on('open', () => {
-        const botClient = clients.get(botWs);
-        if (botClient) botClient.isBot = true;
-        botWs.send(JSON.stringify({ type: 'join_session', inviteCode, userName: name }));
-      });
-
-      botWs.on('message', (raw) => {
-        let msg; try { msg = JSON.parse(raw); } catch { return; }
-        if (msg.type === 'session_state') {
-          // Spawn at owner's position
-          const owner = (msg.presence || []).find(p => p.role === 'owner');
-          if (owner && owner.position) {
-            x = owner.position.x || 0;
-            y = owner.position.y || 0;
-            z = owner.position.z || 0;
-          }
-          // Find the smallest room containing the owner (skip outer boundary)
-          if (rooms.length > 0) {
-            let bestRoom = null;
-            let bestArea = Infinity;
-            for (const r of rooms) {
-              if (ptInPoly(x, z, r)) {
-                const area = polyArea(r);
-                if (area < bestArea) { bestArea = area; bestRoom = r; }
-              }
-            }
-            if (bestRoom) currentRoom = bestRoom;
-          }
-          // Make sure bot starts inside room
-          if (currentRoom && !isInsideWithMargin(x, z, currentRoom, BOT_WALL_MARGIN)) {
-            const p = randInPoly(currentRoom);
-            x = p.x; z = p.z;
-          }
-          const inRoom = currentRoom ? ptInPoly(x, z, currentRoom) : 'no-room';
-          log('Bots', `${name} joined as player ${msg.playerId} at (${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)}) inRoom=${inRoom}`);
-          timer = setInterval(() => {
-            if (botWs.readyState !== WebSocket.OPEN) { clearInterval(timer); return; }
-
-            // Pause / look around
-            if (!paused && Math.random() < BOT_PAUSE_CHANCE) {
-              paused = true;
-              pauseTicks = BOT_PAUSE_TICKS + Math.floor(Math.random() * BOT_PAUSE_TICKS);
-              lookDir = Math.random() < 0.5 ? 1 : -1;
-            }
-
-            if (paused) {
-              rotY += BOT_LOOK_SPEED * lookDir;
-              if (Math.random() < 0.08) lookDir *= -1;
-              pauseTicks--;
-              if (pauseTicks <= 0) paused = false;
-            } else {
-              // Switch rooms
-              if (rooms.length > 1 && Math.random() < BOT_ROOM_CHANGE) {
-                currentRoom = rooms[Math.floor(Math.random() * rooms.length)];
-                const p = randInPoly(currentRoom); x = p.x; z = p.z;
-              }
-              // Direction change
-              if (Math.random() < BOT_DIR_CHANGE) {
-                dirX = (Math.random() - 0.5) * 2; dirZ = (Math.random() - 0.5) * 2;
-                len = Math.sqrt(dirX * dirX + dirZ * dirZ) || 1; dirX /= len; dirZ /= len;
-              }
-              const nx = x + dirX * BOT_WALK_SPEED, nz = z + dirZ * BOT_WALK_SPEED;
-              if (currentRoom && isInsideWithMargin(nx, nz, currentRoom, BOT_WALL_MARGIN)) {
-                x = nx; z = nz;
-              } else if (!currentRoom) {
-                x = nx; z = nz;
-                const d = Math.sqrt(x * x + z * z);
-                if (d > 8) { dirX = -x / d; dirZ = -z / d; len = Math.sqrt(dirX * dirX + dirZ * dirZ) || 1; dirX /= len; dirZ /= len; }
-              } else {
-                // Hit wall — pick new random direction, do NOT move
-                dirX = (Math.random() - 0.5) * 2; dirZ = (Math.random() - 0.5) * 2;
-                len = Math.sqrt(dirX * dirX + dirZ * dirZ) || 1; dirX /= len; dirZ /= len;
-              }
-              rotY = Math.atan2(dirX, dirZ) * 180 / Math.PI;
-            }
-
-            botWs.send(JSON.stringify({ type: 'move', position: { x, y, z }, rotation: { x: 0, y: rotY, z: 0 } }));
-          }, BOT_MOVE_INTERVAL);
-        }
-        if (msg.type === 'session_error') log('Bots', `${name} error: ${msg.code}`);
-      });
-
-      botWs.on('close', () => { if (timer) clearInterval(timer); });
-      botWs.on('error', () => {});
-    }, i * 1000);
+    const slot = { index: i, botWs: null, moveTimer: null, reconnectTimer: null };
+    manager.slots.push(slot);
+    // Stagger initial connections
+    const initialDelay = i * 2000 + Math.random() * 3000;
+    slot.reconnectTimer = setTimeout(() => connectBot(slot, inviteCode, rooms, spawnPos), initialDelay);
   }
+
+  // Periodic check: stop manager if session gone or no humans
+  manager.managerTimer = setInterval(() => {
+    const s = sessions.get(inviteCode);
+    if (!s || !hasHumanPlayers(s)) {
+      stopBotManager(inviteCode);
+    }
+  }, 5000);
+}
+
+function connectBot(slot, inviteCode, rooms, spawnPos) {
+  if (slot.botWs) return; // already connected
+
+  const session = sessions.get(inviteCode);
+  if (!session || !hasHumanPlayers(session)) return;
+
+  const name = BOT_NAMES[slot.index % BOT_NAMES.length];
+  const botWs = new WebSocket(`ws://localhost:${PORT}`);
+  slot.botWs = botWs;
+
+  let currentRoom = null;
+  if (rooms.length > 0) {
+    let minArea = Infinity;
+    for (const r of rooms) {
+      const a = polyArea(r);
+      if (a < minArea) { minArea = a; currentRoom = r; }
+    }
+  }
+
+  let x = spawnPos.x, y = spawnPos.y, z = spawnPos.z;
+  let dirX = (Math.random() - 0.5) * 2, dirZ = (Math.random() - 0.5) * 2;
+  let len = Math.sqrt(dirX * dirX + dirZ * dirZ) || 1; dirX /= len; dirZ /= len;
+  let rotY = Math.random() * 360;
+  let paused = false, pauseTicks = 0, lookDir = 1;
+
+  botWs.on('open', () => {
+    const botClient = clients.get(botWs);
+    if (botClient) botClient.isBot = true;
+    botWs.send(JSON.stringify({ type: 'join_session', inviteCode, userName: name }));
+  });
+
+  botWs.on('message', (raw) => {
+    let msg; try { msg = JSON.parse(raw); } catch { return; }
+    if (msg.type === 'session_state') {
+      // Find room containing spawn position
+      if (rooms.length > 0) {
+        let bestRoom = null, bestArea = Infinity;
+        for (const r of rooms) {
+          if (ptInPoly(x, z, r)) {
+            const area = polyArea(r);
+            if (area < bestArea) { bestArea = area; bestRoom = r; }
+          }
+        }
+        if (bestRoom) currentRoom = bestRoom;
+      }
+      if (currentRoom && !isInsideWithMargin(x, z, currentRoom, BOT_WALL_MARGIN)) {
+        const p = randInPoly(currentRoom); x = p.x; z = p.z;
+      }
+      log('Bots', `${name} connected at (${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})`);
+
+      slot.moveTimer = setInterval(() => {
+        if (botWs.readyState !== WebSocket.OPEN) { clearInterval(slot.moveTimer); return; }
+
+        if (!paused && Math.random() < BOT_PAUSE_CHANCE) {
+          paused = true;
+          pauseTicks = BOT_PAUSE_TICKS + Math.floor(Math.random() * BOT_PAUSE_TICKS);
+          lookDir = Math.random() < 0.5 ? 1 : -1;
+        }
+
+        if (paused) {
+          rotY += BOT_LOOK_SPEED * lookDir;
+          if (Math.random() < 0.08) lookDir *= -1;
+          pauseTicks--;
+          if (pauseTicks <= 0) paused = false;
+        } else {
+          if (rooms.length > 1 && Math.random() < BOT_ROOM_CHANGE) {
+            currentRoom = rooms[Math.floor(Math.random() * rooms.length)];
+            const p = randInPoly(currentRoom); x = p.x; z = p.z;
+          }
+          if (Math.random() < BOT_DIR_CHANGE) {
+            dirX = (Math.random() - 0.5) * 2; dirZ = (Math.random() - 0.5) * 2;
+            len = Math.sqrt(dirX * dirX + dirZ * dirZ) || 1; dirX /= len; dirZ /= len;
+          }
+          const nx = x + dirX * BOT_WALK_SPEED, nz = z + dirZ * BOT_WALK_SPEED;
+          if (currentRoom && isInsideWithMargin(nx, nz, currentRoom, BOT_WALL_MARGIN)) {
+            x = nx; z = nz;
+          } else if (!currentRoom) {
+            x = nx; z = nz;
+            const d = Math.sqrt(x * x + z * z);
+            if (d > 8) { dirX = -x / d; dirZ = -z / d; len = Math.sqrt(dirX * dirX + dirZ * dirZ) || 1; dirX /= len; dirZ /= len; }
+          } else {
+            dirX = (Math.random() - 0.5) * 2; dirZ = (Math.random() - 0.5) * 2;
+            len = Math.sqrt(dirX * dirX + dirZ * dirZ) || 1; dirX /= len; dirZ /= len;
+          }
+          rotY = Math.atan2(dirX, dirZ) * 180 / Math.PI;
+        }
+
+        botWs.send(JSON.stringify({ type: 'move', position: { x, y, z }, rotation: { x: 0, y: rotY, z: 0 } }));
+      }, BOT_MOVE_INTERVAL);
+
+      // Schedule random disconnect
+      const onlineTime = randBetween(BOT_MIN_ONLINE_SEC, BOT_MAX_ONLINE_SEC) * 1000;
+      setTimeout(() => {
+        if (slot.botWs === botWs && botWs.readyState === WebSocket.OPEN) {
+          log('Bots', `${name} disconnecting (was online ${(onlineTime / 1000).toFixed(0)}s)`);
+          disconnectBot(slot);
+          // Schedule reconnect
+          const offlineTime = randBetween(BOT_MIN_OFFLINE_SEC, BOT_MAX_OFFLINE_SEC) * 1000;
+          slot.reconnectTimer = setTimeout(() => connectBot(slot, inviteCode, rooms, spawnPos), offlineTime);
+        }
+      }, onlineTime);
+    }
+    if (msg.type === 'session_error') log('Bots', `${name} error: ${msg.code}`);
+  });
+
+  botWs.on('close', () => {
+    if (slot.moveTimer) { clearInterval(slot.moveTimer); slot.moveTimer = null; }
+    if (slot.botWs === botWs) slot.botWs = null;
+  });
+  botWs.on('error', () => {});
+}
+
+function disconnectBot(slot) {
+  if (slot.moveTimer) { clearInterval(slot.moveTimer); slot.moveTimer = null; }
+  if (slot.botWs) {
+    slot.botWs.close();
+    slot.botWs = null;
+  }
+}
+
+function stopBotManager(inviteCode) {
+  const manager = sessionBotManagers.get(inviteCode);
+  if (!manager) return;
+  manager.stopped = true;
+  if (manager.managerTimer) clearInterval(manager.managerTimer);
+  for (const slot of manager.slots) {
+    if (slot.reconnectTimer) clearTimeout(slot.reconnectTimer);
+    disconnectBot(slot);
+  }
+  sessionBotManagers.delete(inviteCode);
+  log('Bots', `Bot manager stopped for ${inviteCode}`);
 }
 
 // --- Start ---
