@@ -462,9 +462,11 @@ function handleLog(ws, client, msg) {
 
   // Send logs only to the session owner
   const ownerPlayer = session.players.get(session.ownerId);
+  const senderPlayer = session.players.get(client.playerId);
+  const userName = senderPlayer ? senderPlayer.userName : `Player ${client.playerId}`;
   if (ownerPlayer && ownerPlayer.ws !== ws && ownerPlayer.ws.readyState === WebSocket.OPEN) {
     send(ownerPlayer.ws, {
-      type: 'remote_log', playerId: client.playerId,
+      type: 'remote_log', playerId: client.playerId, userName,
       tag: msg.tag || '', text: msg.text || ''
     });
   }
@@ -854,7 +856,7 @@ wss.on('connection', (ws) => {
 
 // --- Inline bots ---
 
-const BOT_NAMES = ['Luna', 'Ricardo', 'Emma', 'Mark', 'Daniel', 'Sophia', 'Alex', 'Mia', 'Leo', 'Zara'];
+const BOT_NAMES = ['Leonid', 'Danila', 'Oksana'];
 const BOT_MOVE_INTERVAL = 200;
 const BOT_WALK_SPEED = 0.2;          // ~1 unit/sec at 200ms interval (matches WASD speed)
 const BOT_DIR_CHANGE = 0.03;
