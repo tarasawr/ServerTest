@@ -188,7 +188,8 @@ function getOrCreateLegacySession(ws, client) {
   const player = {
     playerId: client.playerId, userId: null,
     userName: `Player ${client.playerId}`, role: 'owner',
-    position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, ws
+    position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
+    viewMode: '3d', ws
   };
   session.players.set(client.playerId, player);
   client.sessionId = session.id;
@@ -197,13 +198,14 @@ function getOrCreateLegacySession(ws, client) {
   const existing = [];
   for (const [, p] of session.players) {
     if (p.playerId !== client.playerId)
-      existing.push({ id: p.playerId, userName: p.userName, color: p.color, position: p.position, rotation: p.rotation });
+      existing.push({ id: p.playerId, userName: p.userName, color: p.color, position: p.position, rotation: p.rotation, viewMode: p.viewMode || '3d' });
   }
   send(ws, { type: 'welcome', playerId: client.playerId, players: existing });
 
   broadcastToSession(session, ws, {
     type: 'player_joined', playerId: client.playerId,
-    position: player.position, rotation: player.rotation
+    position: player.position, rotation: player.rotation,
+    viewMode: player.viewMode || '3d'
   });
 
   log('Legacy', `Player ${client.playerId} auto-joined (total: ${session.players.size})`);
@@ -251,7 +253,8 @@ function handleCreateSession(ws, client, msg) {
     playerId: client.playerId, userId: msg.userId || null,
     userName: msg.userName || `Player ${client.playerId}`, role: 'owner',
     color: pickColor(session),
-    position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, ws
+    position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
+    viewMode: '3d', ws
   };
 
   session.players.set(client.playerId, player);
@@ -286,7 +289,8 @@ function handleJoinSession(ws, client, msg) {
     playerId: client.playerId, userId: msg.userId || null,
     userName: msg.userName || `Player ${client.playerId}`, role,
     color: pickColor(session),
-    position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, ws
+    position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
+    viewMode: '3d', ws
   };
 
   session.players.set(client.playerId, player);
@@ -296,7 +300,8 @@ function handleJoinSession(ws, client, msg) {
   for (const [, p] of session.players) {
     presence.push({
       playerId: p.playerId, userId: p.userId, userName: p.userName,
-      role: p.role, color: p.color, position: p.position, rotation: p.rotation
+      role: p.role, color: p.color, position: p.position, rotation: p.rotation,
+      viewMode: p.viewMode || '3d'
     });
   }
 
@@ -310,7 +315,8 @@ function handleJoinSession(ws, client, msg) {
     type: 'player_joined', playerId: client.playerId,
     userId: player.userId, userName: player.userName, role,
     color: player.color,
-    position: player.position, rotation: player.rotation
+    position: player.position, rotation: player.rotation,
+    viewMode: player.viewMode || '3d'
   });
 
   log('Session', `Player ${client.playerId} joined ${session.id} as ${role} (total: ${session.players.size})`);
@@ -393,11 +399,16 @@ function handleMove(ws, client, msg) {
   if (!session) return;
 
   const player = session.players.get(client.playerId);
-  if (player) { player.position = msg.position || player.position; player.rotation = msg.rotation || player.rotation; }
+  if (player) {
+    player.position = msg.position || player.position;
+    player.rotation = msg.rotation || player.rotation;
+    if (msg.viewMode) player.viewMode = msg.viewMode;
+  }
 
   broadcastToSession(session, ws, {
     type: 'player_moved', playerId: client.playerId,
-    position: msg.position, rotation: msg.rotation
+    position: msg.position, rotation: msg.rotation,
+    viewMode: msg.viewMode || '3d'
   });
 }
 
