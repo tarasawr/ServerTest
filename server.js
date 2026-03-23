@@ -456,6 +456,20 @@ function handleSelection(ws, client, msg) {
   });
 }
 
+function handleLog(ws, client, msg) {
+  const session = getSession(ws, client, true);
+  if (!session) return;
+
+  // Send logs only to the session owner
+  const ownerPlayer = session.players.get(session.ownerId);
+  if (ownerPlayer && ownerPlayer.ws !== ws && ownerPlayer.ws.readyState === WebSocket.OPEN) {
+    send(ownerPlayer.ws, {
+      type: 'remote_log', playerId: client.playerId,
+      tag: msg.tag || '', text: msg.text || ''
+    });
+  }
+}
+
 function handleFurnitureUpdate(ws, client, msg) {
   const session = getSession(ws, client, true);
   if (!session) return;
@@ -813,6 +827,7 @@ wss.on('connection', (ws) => {
       case 'furniture_change_variation': handleFurnitureChangeVariation(ws, client, msg); break;
       case 'domain_change': handleDomainChange(ws, client, msg); break;
       case 'selection':      handleSelection(ws, client, msg); break;
+      case 'log':            handleLog(ws, client, msg); break;
       case 'furniture_lock': handleFurnitureLock(ws, client, msg); break;
       case 'furniture_unlock': handleFurnitureUnlock(ws, client, msg); break;
       case 'update_state':   handleUpdateState(ws, client, msg); break;
