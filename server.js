@@ -3,7 +3,7 @@ const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 3000;
 const LEGACY_INVITE = '__legacy__';
-const BOT_COUNT = 0; // bots auto-spawned per session (0 to disable)
+let BOT_COUNT = 0; // bots auto-spawned per session (0 to disable)
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -37,6 +37,27 @@ const server = http.createServer((req, res) => {
     }
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'No active session' }));
+    return;
+  }
+
+  // GET /bots?count=2 — spawn bots in all active sessions
+  // GET /bots?count=0 — disable bots (new sessions won't get bots)
+  // GET /bots — show current bot count
+  if (url.pathname === '/bots') {
+    const count = url.searchParams.get('count');
+    if (count !== null) {
+      BOT_COUNT = Math.max(0, Math.min(10, parseInt(count) || 0));
+      if (BOT_COUNT > 0) {
+        // Spawn bots in all existing sessions that don't have bots yet
+        for (const [code, s] of sessions) {
+          if (code === LEGACY_INVITE) continue;
+          spawnSessionBots(code, s.projectXml);
+        }
+      }
+      log('Bots', `Bot count set to ${BOT_COUNT}`);
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ botCount: BOT_COUNT }));
     return;
   }
 
