@@ -273,7 +273,7 @@ function handleCreateSession(ws, client, msg) {
   const player = {
     playerId: client.playerId, userId: msg.userId || null,
     userName: msg.userName || `Player ${client.playerId}`, role: 'owner',
-    color: pickColor(session),
+    color: pickColor(session), avatarUrl: msg.avatarUrl || '',
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
     viewMode: '3d', ws
   };
@@ -309,7 +309,7 @@ function handleJoinSession(ws, client, msg) {
   const player = {
     playerId: client.playerId, userId: msg.userId || null,
     userName: msg.userName || `Player ${client.playerId}`, role,
-    color: pickColor(session),
+    color: pickColor(session), avatarUrl: msg.avatarUrl || '',
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
     viewMode: '3d', ws
   };
@@ -321,7 +321,8 @@ function handleJoinSession(ws, client, msg) {
   for (const [, p] of session.players) {
     presence.push({
       playerId: p.playerId, userId: p.userId, userName: p.userName,
-      role: p.role, color: p.color, position: p.position, rotation: p.rotation,
+      role: p.role, color: p.color, avatarUrl: p.avatarUrl || '',
+      position: p.position, rotation: p.rotation,
       viewMode: p.viewMode || '3d'
     });
   }
@@ -335,7 +336,7 @@ function handleJoinSession(ws, client, msg) {
   broadcastToSession(session, ws, {
     type: 'player_joined', playerId: client.playerId,
     userId: player.userId, userName: player.userName, role,
-    color: player.color,
+    color: player.color, avatarUrl: player.avatarUrl || '',
     position: player.position, rotation: player.rotation,
     viewMode: player.viewMode || '3d'
   });
