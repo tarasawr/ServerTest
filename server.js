@@ -1012,8 +1012,22 @@ function connectBot(slot, inviteCode, rooms, spawnPos) {
     botWs.send(JSON.stringify({ type: 'join_session', inviteCode, userName: name }));
   });
 
+  const chunkBuf = new Map(); // messageId -> { chunks[], total }
   botWs.on('message', (raw) => {
     let msg; try { msg = JSON.parse(raw); } catch { return; }
+
+    // Reassemble chunked messages
+    if (msg.type === 'chunk') {
+      let entry = chunkBuf.get(msg.messageId);
+      if (!entry) { entry = { chunks: [], total: msg.total }; chunkBuf.set(msg.messageId, entry); }
+      entry.chunks[msg.index] = msg.data;
+      const received = entry.chunks.filter(c => c !== undefined).length;
+      if (received < entry.total) return;
+      chunkBuf.delete(msg.messageId);
+      const full = entry.chunks.join('');
+      try { msg = JSON.parse(full); } catch { return; }
+    }
+
     if (msg.type === 'session_state') {
       // Find room containing spawn position
       if (rooms.length > 0) {
