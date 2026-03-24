@@ -812,7 +812,7 @@ wss.on('connection', (ws) => {
     const client = clients.get(ws);
 
     // Compact incoming log (skip noisy move/pointer)
-    if (msg.type !== 'move' && msg.type !== 'pointer') {
+    if (msg.type !== 'move' && msg.type !== 'pointer' && msg.type !== 'ping') {
       const fid = (msg.furnitureId || msg.targetId || '').slice(-6);
       const extra = fid ? ` id=..${fid}` : '';
       log('⬇ IN', `p${client.playerId} ${msg.type}${extra}${msg.committed ? ' COMMIT' : ''}`);
@@ -835,6 +835,7 @@ wss.on('connection', (ws) => {
       case 'furniture_unlock': handleFurnitureUnlock(ws, client, msg); break;
       case 'update_state':   handleUpdateState(ws, client, msg); break;
       case 'link_permission_change': handleLinkPermissionChange(ws, client, msg); break;
+      case 'ping': send(ws, { type: 'pong' }); break;
       default:
         log('Warn', `Player ${client.playerId} sent unknown type: "${msg.type}"`);
         break;
