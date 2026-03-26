@@ -621,6 +621,39 @@ function handleDomainChange(ws, client, msg) {
   log('Domain', `change target="${msg.targetId}" props=[${names}] by player=${client.playerId} → ${n} peers`);
 }
 
+// --- Wall drag ---
+
+function handleWallDrag(ws, client, msg) {
+  const session = getSession(ws, client, true);
+  if (!session) return;
+  const role = session.players.get(client.playerId)?.role;
+  if (!canEdit(role)) {
+    log('Denied', `player=${client.playerId} wall_drag (role: ${role})`);
+    return;
+  }
+
+  const wid = (msg.wallId || '').slice(-6);
+  const wallCount = msg.walls ? msg.walls.length : 0;
+
+  // Simple relay — no LWW needed for transient drag operations
+  const n = broadcastToSession(session, ws, {
+    type: 'wall_drag', playerId: client.playerId,
+    wallId: msg.wallId, phase: msg.phase,
+    clickZone: msg.clickZone, committed: msg.committed,
+    walls: msg.walls
+  });
+
+  // Log START/END only to avoid spam
+  if (msg.phase !== 'move') {
+    log('WallDrag', `${msg.phase} w=${wid} zone=${msg.clickZone} walls=${wallCount} committed=${msg.committed} by p${client.playerId} → ${n} peers`);
+  }
+
+  // Increment sequence on committed END (structural change)
+  if (msg.phase === 'end' && msg.committed) {
+    session.sequenceNumber++;
+  }
+}
+
 // --- Furniture locking ---
 
 // Lock key format: "furnitureId:property" (per-property locking)
@@ -831,6 +864,7 @@ wss.on('connection', (ws) => {
       case 'domain_change': handleDomainChange(ws, client, msg); break;
       case 'selection':      handleSelection(ws, client, msg); break;
       case 'log':            handleLog(ws, client, msg); break;
+      case 'wall_drag': handleWallDrag(ws, client, msg); break;
       case 'furniture_lock': handleFurnitureLock(ws, client, msg); break;
       case 'furniture_unlock': handleFurnitureUnlock(ws, client, msg); break;
       case 'update_state':   handleUpdateState(ws, client, msg); break;
