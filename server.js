@@ -1030,8 +1030,9 @@ function spawnSessionBots(inviteCode, projectXml) {
   const manager = { slots: [], managerTimer: null, stopped: false };
   sessionBotManagers.set(inviteCode, manager);
 
+  const avatarPool = shuffledBotAvatars();
   for (let i = 0; i < BOT_COUNT; i++) {
-    const slot = { index: i, botWs: null, moveTimer: null, reconnectTimer: null };
+    const slot = { index: i, botWs: null, moveTimer: null, reconnectTimer: null, avatarUrl: avatarPool[i % avatarPool.length] };
     manager.slots.push(slot);
     // Stagger initial connections
     const initialDelay = i * 2000 + Math.random() * 3000;
@@ -1075,7 +1076,7 @@ function connectBot(slot, inviteCode, rooms, spawnPos) {
   botWs.on('open', () => {
     const botClient = clients.get(botWs);
     if (botClient) botClient.isBot = true;
-    botWs.send(JSON.stringify({ type: 'join_session', inviteCode, userName: name }));
+    botWs.send(JSON.stringify({ type: 'join_session', inviteCode, userName: name, avatarUrl: slot.avatarUrl || '' }));
   });
 
   const chunkBuf = new Map(); // messageId -> { chunks[], total }
