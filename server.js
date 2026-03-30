@@ -221,7 +221,7 @@ function getOrCreateLegacySession(ws, client) {
     if (p.playerId !== client.playerId)
       existing.push({ id: p.playerId, userName: p.userName, color: p.color, position: p.position, rotation: p.rotation, viewMode: p.viewMode || '3d' });
   }
-  send(ws, { type: 'welcome', playerId: client.playerId, players: existing });
+  send(ws, { type: 'welcome', playerId: client.playerId, role: player.role, players: existing });
 
   broadcastToSession(session, ws, {
     type: 'player_joined', playerId: client.playerId,
@@ -461,16 +461,14 @@ function handleLog(ws, client, msg) {
   const session = getSession(ws, client, true);
   if (!session) return;
 
-  // Send logs only to the session owner
-  const ownerPlayer = session.players.get(session.ownerId);
   const senderPlayer = session.players.get(client.playerId);
   const userName = senderPlayer ? senderPlayer.userName : `Player ${client.playerId}`;
-  if (ownerPlayer && ownerPlayer.ws !== ws && ownerPlayer.ws.readyState === WebSocket.OPEN) {
-    send(ownerPlayer.ws, {
-      type: 'remote_log', playerId: client.playerId, userName,
-      tag: msg.tag || '', text: msg.text || ''
-    });
-  }
+
+  // Broadcast logs to all other players in session
+  broadcastToSession(session, ws, {
+    type: 'remote_log', playerId: client.playerId, userName,
+    tag: msg.tag || '', text: msg.text || ''
+  });
 }
 
 function handleFurnitureUpdate(ws, client, msg) {
@@ -652,6 +650,44 @@ function handleWallDrag(ws, client, msg) {
   if (msg.phase === 'end' && msg.committed) {
     session.sequenceNumber++;
   }
+}
+
+function handleWallAdd(ws, client, msg) {
+  const session = getSession(ws, client, true);
+  if (!session) return;
+  const role = session.players.get(client.playerId)?.role;
+  if (!canEdit(role)) {
+    log('Denied', `player=${client.playerId} wall_add (role: ${role})`);
+    return;
+  }
+  session.sequenceNumber++;
+
+  const n = broadcastToSession(session, ws, {
+    type: 'wall_add', playerId: client.playerId,
+    wallId: msg.wallId,
+    sx: msg.sx, sy: msg.sy, ex: msg.ex, ey: msg.ey,
+    height: msg.height, thickness: msg.thickness
+  });
+
+  log('Wall', `add "${msg.wallId}" (${msg.sx?.toFixed(2)},${msg.sy?.toFixed(2)})-(${msg.ex?.toFixed(2)},${msg.ey?.toFixed(2)}) by p${client.playerId} → ${n} peers`);
+}
+
+function handleWallRemove(ws, client, msg) {
+  const session = getSession(ws, client, true);
+  if (!session) return;
+  const role = session.players.get(client.playerId)?.role;
+  if (!canEdit(role)) {
+    log('Denied', `player=${client.playerId} wall_remove (role: ${role})`);
+    return;
+  }
+  session.sequenceNumber++;
+
+  const n = broadcastToSession(session, ws, {
+    type: 'wall_remove', playerId: client.playerId,
+    wallId: msg.wallId
+  });
+
+  log('Wall', `remove "${msg.wallId}" by p${client.playerId} → ${n} peers`);
 }
 
 // --- Furniture locking ---
@@ -865,6 +901,8 @@ wss.on('connection', (ws) => {
       case 'selection':      handleSelection(ws, client, msg); break;
       case 'log':            handleLog(ws, client, msg); break;
       case 'wall_drag': handleWallDrag(ws, client, msg); break;
+      case 'wall_add': handleWallAdd(ws, client, msg); break;
+      case 'wall_remove': handleWallRemove(ws, client, msg); break;
       case 'furniture_lock': handleFurnitureLock(ws, client, msg); break;
       case 'furniture_unlock': handleFurnitureUnlock(ws, client, msg); break;
       case 'update_state':   handleUpdateState(ws, client, msg); break;
