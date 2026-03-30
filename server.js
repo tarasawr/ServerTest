@@ -461,16 +461,14 @@ function handleLog(ws, client, msg) {
   const session = getSession(ws, client, true);
   if (!session) return;
 
-  // Send logs only to the session owner
-  const ownerPlayer = session.players.get(session.ownerId);
   const senderPlayer = session.players.get(client.playerId);
   const userName = senderPlayer ? senderPlayer.userName : `Player ${client.playerId}`;
-  if (ownerPlayer && ownerPlayer.ws !== ws && ownerPlayer.ws.readyState === WebSocket.OPEN) {
-    send(ownerPlayer.ws, {
-      type: 'remote_log', playerId: client.playerId, userName,
-      tag: msg.tag || '', text: msg.text || ''
-    });
-  }
+
+  // Broadcast logs to all other players in session
+  broadcastToSession(session, ws, {
+    type: 'remote_log', playerId: client.playerId, userName,
+    tag: msg.tag || '', text: msg.text || ''
+  });
 }
 
 function handleFurnitureUpdate(ws, client, msg) {
