@@ -893,6 +893,36 @@ wss.on('connection', (ws) => {
 // --- Inline bots ---
 
 const BOT_NAMES = ['Leonid', 'Danila', 'Oksana'];
+const BOT_AVATARS = [
+  'https://i.pravatar.cc/150?img=1',
+  'https://i.pravatar.cc/150?img=3',
+  'https://i.pravatar.cc/150?img=5',
+  'https://i.pravatar.cc/150?img=7',
+  'https://i.pravatar.cc/150?img=10',
+  'https://i.pravatar.cc/150?img=12',
+  'https://i.pravatar.cc/150?img=14',
+  'https://i.pravatar.cc/150?img=16',
+  'https://i.pravatar.cc/150?img=20',
+  'https://i.pravatar.cc/150?img=22',
+  'https://i.pravatar.cc/150?img=25',
+  'https://i.pravatar.cc/150?img=27',
+  'https://i.pravatar.cc/150?img=30',
+  'https://i.pravatar.cc/150?img=32',
+  'https://i.pravatar.cc/150?img=35',
+  'https://i.pravatar.cc/150?img=38',
+  'https://i.pravatar.cc/150?img=40',
+  'https://i.pravatar.cc/150?img=44',
+  'https://i.pravatar.cc/150?img=47',
+  'https://i.pravatar.cc/150?img=50',
+];
+function shuffledBotAvatars() {
+  const arr = [...BOT_AVATARS];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
 const BOT_MOVE_INTERVAL = 200;
 const BOT_WALK_SPEED = 0.2;          // ~1 unit/sec at 200ms interval (matches WASD speed)
 const BOT_DIR_CHANGE = 0.03;
