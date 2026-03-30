@@ -654,6 +654,44 @@ function handleWallDrag(ws, client, msg) {
   }
 }
 
+function handleWallAdd(ws, client, msg) {
+  const session = getSession(ws, client, true);
+  if (!session) return;
+  const role = session.players.get(client.playerId)?.role;
+  if (!canEdit(role)) {
+    log('Denied', `player=${client.playerId} wall_add (role: ${role})`);
+    return;
+  }
+  session.sequenceNumber++;
+
+  const n = broadcastToSession(session, ws, {
+    type: 'wall_add', playerId: client.playerId,
+    wallId: msg.wallId,
+    sx: msg.sx, sy: msg.sy, ex: msg.ex, ey: msg.ey,
+    height: msg.height, thickness: msg.thickness
+  });
+
+  log('Wall', `add "${msg.wallId}" (${msg.sx?.toFixed(2)},${msg.sy?.toFixed(2)})-(${msg.ex?.toFixed(2)},${msg.ey?.toFixed(2)}) by p${client.playerId} → ${n} peers`);
+}
+
+function handleWallRemove(ws, client, msg) {
+  const session = getSession(ws, client, true);
+  if (!session) return;
+  const role = session.players.get(client.playerId)?.role;
+  if (!canEdit(role)) {
+    log('Denied', `player=${client.playerId} wall_remove (role: ${role})`);
+    return;
+  }
+  session.sequenceNumber++;
+
+  const n = broadcastToSession(session, ws, {
+    type: 'wall_remove', playerId: client.playerId,
+    wallId: msg.wallId
+  });
+
+  log('Wall', `remove "${msg.wallId}" by p${client.playerId} → ${n} peers`);
+}
+
 // --- Furniture locking ---
 
 // Lock key format: "furnitureId:property" (per-property locking)
@@ -865,6 +903,8 @@ wss.on('connection', (ws) => {
       case 'selection':      handleSelection(ws, client, msg); break;
       case 'log':            handleLog(ws, client, msg); break;
       case 'wall_drag': handleWallDrag(ws, client, msg); break;
+      case 'wall_add': handleWallAdd(ws, client, msg); break;
+      case 'wall_remove': handleWallRemove(ws, client, msg); break;
       case 'furniture_lock': handleFurnitureLock(ws, client, msg); break;
       case 'furniture_unlock': handleFurnitureUnlock(ws, client, msg); break;
       case 'update_state':   handleUpdateState(ws, client, msg); break;
