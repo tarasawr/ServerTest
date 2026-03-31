@@ -134,16 +134,21 @@ function fetchProjectXml(invite) {
   });
 }
 
-/** Filter rooms to indoor only: a room is indoor if its center is inside another room. */
+/** Filter rooms to indoor only: find outdoor (most containing), keep rooms inside it. */
 function filterIndoorRooms(rooms) {
   if (rooms.length <= 1) return rooms;
-  const indoor = rooms.filter((room, i) => {
-    const c = polygonCenter(room);
+  const centers = rooms.map(r => polygonCenter(r));
+  let outdoorIdx = 0, maxContained = -1;
+  for (let i = 0; i < rooms.length; i++) {
+    let count = 0;
     for (let j = 0; j < rooms.length; j++) {
-      if (j === i) continue;
-      if (pointInPolygon(c.x, c.z, rooms[j])) return true;
+      if (j !== i && pointInPolygon(centers[j].x, centers[j].z, rooms[i])) count++;
     }
-    return false;
+    if (count > maxContained) { maxContained = count; outdoorIdx = i; }
+  }
+  const indoor = rooms.filter((r, i) => {
+    if (i === outdoorIdx) return false;
+    return pointInPolygon(centers[i].x, centers[i].z, rooms[outdoorIdx]);
   });
   return indoor.length > 0 ? indoor : rooms;
 }
