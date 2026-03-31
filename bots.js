@@ -18,7 +18,7 @@ const PAUSE_DURATION = 30;       // ticks to pause (~3s, doubled for 100ms ticks
 const LOOK_SPEED = 2;            // degrees per tick when looking around (halved)
 const ROOM_CHANGE_CHANCE = 0.0025; // chance per tick to move to another room (halved)
 const WALL_MARGIN = 0.15;        // stay this far from walls
-const VIEW_SWITCH_CHANCE = 0.001; // chance per tick to toggle 2D/3D
+const VIEW_SWITCH_CHANCE = 0.005; // chance per tick to toggle 2D/3D (~once per 20s)
 
 const inviteCode = process.argv[2];
 const botCount = parseInt(process.argv[3]) || 3;

@@ -4,6 +4,7 @@ const WebSocket = require('ws');
 const PORT = process.env.PORT || 3000;
 const LEGACY_INVITE = '__legacy__';
 let BOT_COUNT = 0; // bots auto-spawned per session (0 to disable)
+let BOT_VIEW_MODE = 'random'; // 'random', '2d', '3d' — forced view mode for bots
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -42,13 +43,14 @@ const server = http.createServer((req, res) => {
 
   // GET /bots?count=2 — spawn bots in all active sessions
   // GET /bots?count=0 — disable bots (new sessions won't get bots)
-  // GET /bots — show current bot count
+  // GET /bots?mode=2d|3d|random — force bot view mode
+  // GET /bots — show current settings
   if (url.pathname === '/bots') {
     const count = url.searchParams.get('count');
+    const mode = url.searchParams.get('mode');
     if (count !== null) {
       BOT_COUNT = Math.max(0, Math.min(10, parseInt(count) || 0));
       if (BOT_COUNT > 0) {
-        // Spawn bots in all existing sessions that don't have bots yet
         for (const [code, s] of sessions) {
           if (code === LEGACY_INVITE) continue;
           spawnSessionBots(code, s.projectXml);
@@ -56,8 +58,12 @@ const server = http.createServer((req, res) => {
       }
       log('Bots', `Bot count set to ${BOT_COUNT}`);
     }
+    if (mode !== null && ['2d', '3d', 'random'].includes(mode)) {
+      BOT_VIEW_MODE = mode;
+      log('Bots', `Bot view mode set to ${BOT_VIEW_MODE}`);
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ botCount: BOT_COUNT }));
+    res.end(JSON.stringify({ botCount: BOT_COUNT, viewMode: BOT_VIEW_MODE }));
     return;
   }
 
@@ -970,7 +976,7 @@ const BOT_PAUSE_TICKS = 30;             // doubled — same real-time duration
 const BOT_LOOK_SPEED = 2;              // halved — same degrees/sec
 const BOT_ROOM_CHANGE = 0.0025;        // halved
 const BOT_WALL_MARGIN = 0.4;
-const BOT_VIEW_SWITCH_CHANCE = 0.001;  // chance per tick to toggle 2D/3D (~once per 100s)
+const BOT_VIEW_SWITCH_CHANCE = 0.005;  // chance per tick to toggle 2D/3D (~once per 20s)
 
 function parseRoomsFromXml(xml) {
   const rooms = [];
@@ -1113,7 +1119,9 @@ function connectBot(slot, inviteCode, rooms) {
   let len = Math.sqrt(dirX * dirX + dirZ * dirZ) || 1; dirX /= len; dirZ /= len;
   let rotY = Math.random() * 360;
   let paused = false, pauseTicks = 0, lookDir = 1;
-  let viewMode = '3d';
+  let viewMode = BOT_VIEW_MODE === 'random'
+    ? (slot.index % 2 === 0 ? '2d' : '3d')
+    : BOT_VIEW_MODE;
 
   botWs.on('open', () => {
     const botClient = clients.get(botWs);
@@ -1177,10 +1185,12 @@ function connectBot(slot, inviteCode, rooms) {
           rotY = Math.atan2(dirX, dirZ) * 180 / Math.PI;
         }
 
-        // Randomly toggle 2D/3D
-        if (Math.random() < BOT_VIEW_SWITCH_CHANCE) {
+        // Randomly toggle 2D/3D (only in random mode)
+        if (BOT_VIEW_MODE === 'random' && Math.random() < BOT_VIEW_SWITCH_CHANCE) {
           viewMode = viewMode === '3d' ? '2d' : '3d';
           log('Bots', `${name} switched to ${viewMode}`);
+        } else if (BOT_VIEW_MODE !== 'random') {
+          viewMode = BOT_VIEW_MODE; // respect forced mode (can change live via /bots?mode=)
         }
 
         const sendY = viewMode === '2d' ? 0 : y;
