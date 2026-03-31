@@ -961,14 +961,15 @@ function shuffledBotAvatars() {
   }
   return arr;
 }
-const BOT_MOVE_INTERVAL = 200;
-const BOT_WALK_SPEED = 0.2;          // ~1 unit/sec at 200ms interval (matches WASD speed)
-const BOT_DIR_CHANGE = 0.03;
-const BOT_PAUSE_CHANCE = 0.01;
-const BOT_PAUSE_TICKS = 15;
-const BOT_LOOK_SPEED = 4;
-const BOT_ROOM_CHANGE = 0.005;
+const BOT_MOVE_INTERVAL = 100;           // ms between position updates (matches client SendRate)
+const BOT_WALK_SPEED = 0.1;             // ~1 unit/sec at 100ms interval (matches WASD speed)
+const BOT_DIR_CHANGE = 0.015;           // halved — ticks are 2x faster now
+const BOT_PAUSE_CHANCE = 0.005;         // halved
+const BOT_PAUSE_TICKS = 30;             // doubled — same real-time duration
+const BOT_LOOK_SPEED = 2;              // halved — same degrees/sec
+const BOT_ROOM_CHANGE = 0.0025;        // halved
 const BOT_WALL_MARGIN = 0.4;
+const BOT_VIEW_SWITCH_CHANCE = 0.001;  // chance per tick to toggle 2D/3D (~once per 100s)
 
 function parseRoomsFromXml(xml) {
   const rooms = [];
@@ -1110,6 +1111,7 @@ function connectBot(slot, inviteCode, rooms, spawnPos) {
   let len = Math.sqrt(dirX * dirX + dirZ * dirZ) || 1; dirX /= len; dirZ /= len;
   let rotY = Math.random() * 360;
   let paused = false, pauseTicks = 0, lookDir = 1;
+  let viewMode = '3d';
 
   botWs.on('open', () => {
     const botClient = clients.get(botWs);
@@ -1187,7 +1189,13 @@ function connectBot(slot, inviteCode, rooms, spawnPos) {
           rotY = Math.atan2(dirX, dirZ) * 180 / Math.PI;
         }
 
-        botWs.send(JSON.stringify({ type: 'move', position: { x, y, z }, rotation: { x: 0, y: rotY, z: 0 } }));
+        // Randomly toggle 2D/3D
+        if (Math.random() < BOT_VIEW_SWITCH_CHANCE) {
+          viewMode = viewMode === '3d' ? '2d' : '3d';
+          log('Bots', `${name} switched to ${viewMode}`);
+        }
+
+        botWs.send(JSON.stringify({ type: 'move', position: { x, y, z }, rotation: { x: 0, y: rotY, z: 0 }, viewMode }));
       }, BOT_MOVE_INTERVAL);
 
       // Schedule random disconnect

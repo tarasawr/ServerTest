@@ -8,16 +8,17 @@ const http = require('http');
 const SERVER_URL = 'ws://localhost:3000';
 const HTTP_URL = 'http://localhost:3000';
 const BOT_NAMES = ['Luna', 'Ricardo', 'Emma', 'Mark', 'Daniel', 'Sophia', 'Alex', 'Mia', 'Leo', 'Zara'];
-const MOVE_INTERVAL = 200;       // ms between position updates
-const LEAVE_CHANCE = 0.002;      // chance per tick to leave (~once per 100s)
+const MOVE_INTERVAL = 100;       // ms between position updates (matches client SendRate)
+const LEAVE_CHANCE = 0.001;      // chance per tick to leave (~once per 100s)
 const REJOIN_DELAY = 5000;       // ms before rejoining after leave
-const WALK_SPEED = 0.05;         // units per tick
-const DIRECTION_CHANGE = 0.03;   // chance per tick to pick new direction
-const PAUSE_CHANCE = 0.01;       // chance per tick to stop and look around
-const PAUSE_DURATION = 15;       // ticks to pause (~3s)
-const LOOK_SPEED = 4;            // degrees per tick when looking around
-const ROOM_CHANGE_CHANCE = 0.005; // chance per tick to move to another room
+const WALK_SPEED = 0.025;        // units per tick (halved — ticks 2x faster)
+const DIRECTION_CHANGE = 0.015;  // chance per tick to pick new direction (halved)
+const PAUSE_CHANCE = 0.005;      // chance per tick to stop and look around (halved)
+const PAUSE_DURATION = 30;       // ticks to pause (~3s, doubled for 100ms ticks)
+const LOOK_SPEED = 2;            // degrees per tick when looking around (halved)
+const ROOM_CHANGE_CHANCE = 0.0025; // chance per tick to move to another room (halved)
 const WALL_MARGIN = 0.15;        // stay this far from walls
+const VIEW_SWITCH_CHANCE = 0.001; // chance per tick to toggle 2D/3D
 
 const inviteCode = process.argv[2];
 const botCount = parseInt(process.argv[3]) || 3;
@@ -163,6 +164,7 @@ class Bot {
     this.paused = false;
     this.pauseTicks = 0;
     this.lookDir = 1;
+    this.viewMode = '3d';
   }
 
   connect() {
@@ -289,11 +291,18 @@ class Bot {
       this.rotY = Math.atan2(this.dirX, this.dirZ) * 180 / Math.PI;
     }
 
+    // Randomly toggle 2D/3D
+    if (Math.random() < VIEW_SWITCH_CHANCE) {
+      this.viewMode = this.viewMode === '3d' ? '2d' : '3d';
+      log(this.name, `Switched to ${this.viewMode}`);
+    }
+
     // Send move
     this.ws.send(JSON.stringify({
       type: 'move',
       position: { x: this.x, y: this.y, z: this.z },
-      rotation: { x: 0, y: this.rotY, z: 0 }
+      rotation: { x: 0, y: this.rotY, z: 0 },
+      viewMode: this.viewMode
     }));
 
     // Random leave
