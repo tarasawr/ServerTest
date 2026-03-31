@@ -914,12 +914,13 @@ wss.on('connection', (ws) => {
     }
   });
 
-  ws.on('close', () => {
+  ws.on('close', (code, reason) => {
     const client = clients.get(ws);
+    const reasonStr = reason ? reason.toString() : 'no reason';
     if (client?.sessionId) leaveSession(ws, client);
     clients.delete(ws);
     cleanupChunkBuffers(ws);
-    log('Disconnect', `Player ${client?.playerId} disconnected (total: ${clients.size})`);
+    log('Disconnect', `Player ${client?.playerId} disconnected (code=${code || 'none'}, reason="${reasonStr}", total: ${clients.size})`);
   });
 
   ws.on('error', (err) => {
