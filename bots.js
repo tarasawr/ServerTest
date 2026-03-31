@@ -134,16 +134,17 @@ function fetchProjectXml(invite) {
   });
 }
 
-/** Filter rooms to indoor only: outdoor is the largest room, exclude it. */
+/** Filter rooms to indoor only: a room is indoor if its center is inside another room. */
 function filterIndoorRooms(rooms) {
   if (rooms.length <= 1) return rooms;
-  let maxArea = -1, maxIdx = 0;
-  const area = r => { let a = 0; for (let i = 0, j = r.length - 1; i < r.length; j = i++) a += (r[j].x + r[i].x) * (r[j].z - r[i].z); return Math.abs(a / 2); };
-  for (let i = 0; i < rooms.length; i++) {
-    const a = area(rooms[i]);
-    if (a > maxArea) { maxArea = a; maxIdx = i; }
-  }
-  const indoor = rooms.filter((_, i) => i !== maxIdx);
+  const indoor = rooms.filter((room, i) => {
+    const c = polygonCenter(room);
+    for (let j = 0; j < rooms.length; j++) {
+      if (j === i) continue;
+      if (pointInPolygon(c.x, c.z, rooms[j])) return true;
+    }
+    return false;
+  });
   return indoor.length > 0 ? indoor : rooms;
 }
 

@@ -67,6 +67,26 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // GET /rooms — show parsed rooms for first active session
+  if (url.pathname === '/rooms') {
+    for (const [code, s] of sessions) {
+      if (code === LEGACY_INVITE) continue;
+      const allRooms = parseRoomsFromXml(s.projectXml || '');
+      const indoor = filterIndoorRooms(allRooms);
+      const data = allRooms.map((r, i) => {
+        const c = polyCenter(r);
+        const a = polyArea(r);
+        return { index: i, center: { x: +c.x.toFixed(1), z: +c.z.toFixed(1) }, area: +a.toFixed(0), indoor: indoor.includes(r) };
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ rooms: data }, null, 2));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ rooms: [], error: 'No active session' }));
+    return;
+  }
+
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end(`Multiplayer server OK. Sessions: ${sessions.size}, Clients: ${clients.size}`);
 });
@@ -1045,16 +1065,20 @@ function isInsideWithMargin(px, pz, poly, margin) {
   return true;
 }
 
-/** Filter rooms to indoor only: outdoor is the largest room (contains all others), exclude it. */
+/** Filter rooms to indoor only.
+ *  A room is indoor if its center is inside another room's polygon (it's enclosed).
+ *  Outdoor rooms are not contained by any other room. */
 function filterIndoorRooms(rooms) {
   if (rooms.length <= 1) return rooms;
-  let maxArea = -1, maxIdx = 0;
-  for (let i = 0; i < rooms.length; i++) {
-    const a = polyArea(rooms[i]);
-    if (a > maxArea) { maxArea = a; maxIdx = i; }
-  }
-  const indoor = rooms.filter((_, i) => i !== maxIdx);
-  log('Bots', `filterIndoorRooms: excluded outdoor (area=${maxArea.toFixed(0)}), ${indoor.length} indoor rooms`);
+  const indoor = rooms.filter((room, i) => {
+    const c = polyCenter(room);
+    for (let j = 0; j < rooms.length; j++) {
+      if (j === i) continue;
+      if (ptInPoly(c.x, c.z, rooms[j])) return true; // center is inside another room → indoor
+    }
+    return false;
+  });
+  log('Bots', `filterIndoorRooms: ${indoor.length}/${rooms.length} enclosed rooms`);
   return indoor.length > 0 ? indoor : rooms;
 }
 
@@ -1072,9 +1096,11 @@ function spawnSessionBots(inviteCode, projectXml) {
   if (sessionBotManagers.has(inviteCode)) return; // already managing
 
   const allRooms = parseRoomsFromXml(projectXml || '');
+  log('Bots', `ALL ${allRooms.length} rooms:`);
+  for (let i = 0; i < allRooms.length; i++) { const c = polyCenter(allRooms[i]); log('Bots', `  [${i}] center=(${c.x.toFixed(1)}, ${c.z.toFixed(1)}), area=${polyArea(allRooms[i]).toFixed(0)}`); }
   const rooms = filterIndoorRooms(allRooms);
-  log('Bots', `Parsed ${allRooms.length} room(s), ${rooms.length} indoor, managing ${BOT_COUNT} bot slots for invite: ${inviteCode}`);
-  for (const r of rooms) { const c = polyCenter(r); log('Bots', `  Indoor room: center=(${c.x.toFixed(1)}, ${c.z.toFixed(1)}), area=${polyArea(r).toFixed(1)}`); }
+  log('Bots', `${rooms.length} indoor rooms after filter, managing ${BOT_COUNT} bot slots`);
+  for (const r of rooms) { const c = polyCenter(r); log('Bots', `  Indoor: center=(${c.x.toFixed(1)}, ${c.z.toFixed(1)}), area=${polyArea(r).toFixed(0)}`); }
 
   const manager = { slots: [], managerTimer: null, stopped: false };
   sessionBotManagers.set(inviteCode, manager);
