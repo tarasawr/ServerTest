@@ -134,20 +134,17 @@ function fetchProjectXml(invite) {
   });
 }
 
-/** Filter rooms to indoor only: find median center, keep rooms within 15 units. */
+/** Filter rooms to indoor only: outdoor is the largest room, exclude it. */
 function filterIndoorRooms(rooms) {
   if (rooms.length <= 1) return rooms;
-  const centers = rooms.map(r => polygonCenter(r));
-  const xs = centers.map(c => c.x).sort((a, b) => a - b);
-  const zs = centers.map(c => c.z).sort((a, b) => a - b);
-  const mid = Math.floor(centers.length / 2);
-  const medX = xs[mid], medZ = zs[mid];
-  const maxDist = 15;
-  const indoor = rooms.filter((r, i) => {
-    const dx = centers[i].x - medX, dz = centers[i].z - medZ;
-    return Math.sqrt(dx * dx + dz * dz) <= maxDist;
-  });
-  return indoor.length > 0 ? indoor : [rooms[0]];
+  let maxArea = -1, maxIdx = 0;
+  const area = r => { let a = 0; for (let i = 0, j = r.length - 1; i < r.length; j = i++) a += (r[j].x + r[i].x) * (r[j].z - r[i].z); return Math.abs(a / 2); };
+  for (let i = 0; i < rooms.length; i++) {
+    const a = area(rooms[i]);
+    if (a > maxArea) { maxArea = a; maxIdx = i; }
+  }
+  const indoor = rooms.filter((_, i) => i !== maxIdx);
+  return indoor.length > 0 ? indoor : rooms;
 }
 
 // --- Bot ---

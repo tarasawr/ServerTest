@@ -1045,21 +1045,17 @@ function isInsideWithMargin(px, pz, poly, margin) {
   return true;
 }
 
-/** Filter rooms to indoor only: find median center, keep rooms within 15 units of it. */
+/** Filter rooms to indoor only: outdoor is the largest room (contains all others), exclude it. */
 function filterIndoorRooms(rooms) {
   if (rooms.length <= 1) return rooms;
-  const centers = rooms.map(r => polyCenter(r));
-  // Median of centers (more robust than mean against outdoor outliers)
-  const xs = centers.map(c => c.x).sort((a, b) => a - b);
-  const zs = centers.map(c => c.z).sort((a, b) => a - b);
-  const mid = Math.floor(centers.length / 2);
-  const medX = xs[mid], medZ = zs[mid];
-  const maxDist = 15; // rooms beyond 15 units from median are outdoor/outliers
-  const indoor = rooms.filter((r, i) => {
-    const dx = centers[i].x - medX, dz = centers[i].z - medZ;
-    return Math.sqrt(dx * dx + dz * dz) <= maxDist;
-  });
-  return indoor.length > 0 ? indoor : [rooms[0]]; // fallback to first room
+  let maxArea = -1, maxIdx = 0;
+  for (let i = 0; i < rooms.length; i++) {
+    const a = polyArea(rooms[i]);
+    if (a > maxArea) { maxArea = a; maxIdx = i; }
+  }
+  const indoor = rooms.filter((_, i) => i !== maxIdx);
+  log('Bots', `filterIndoorRooms: excluded outdoor (area=${maxArea.toFixed(0)}), ${indoor.length} indoor rooms`);
+  return indoor.length > 0 ? indoor : rooms;
 }
 
 // Per-session bot manager: randomly connects/disconnects bots to simulate real players
