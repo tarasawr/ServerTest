@@ -297,11 +297,13 @@ class Bot {
       log(this.name, `Switched to ${this.viewMode}`);
     }
 
-    // Send move
+    // Send move — in 2D mode cursor is on floor (y=0, no rotation)
+    const sendY = this.viewMode === '2d' ? 0 : this.y;
+    const sendRotY = this.viewMode === '2d' ? 0 : this.rotY;
     this.ws.send(JSON.stringify({
       type: 'move',
-      position: { x: this.x, y: this.y, z: this.z },
-      rotation: { x: 0, y: this.rotY, z: 0 },
+      position: { x: this.x, y: sendY, z: this.z },
+      rotation: { x: 0, y: sendRotY, z: 0 },
       viewMode: this.viewMode
     }));
 

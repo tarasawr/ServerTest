@@ -1195,7 +1195,9 @@ function connectBot(slot, inviteCode, rooms, spawnPos) {
           log('Bots', `${name} switched to ${viewMode}`);
         }
 
-        botWs.send(JSON.stringify({ type: 'move', position: { x, y, z }, rotation: { x: 0, y: rotY, z: 0 }, viewMode }));
+        const sendY = viewMode === '2d' ? 0 : y;
+        const sendRotY = viewMode === '2d' ? 0 : rotY;
+        botWs.send(JSON.stringify({ type: 'move', position: { x, y: sendY, z }, rotation: { x: 0, y: sendRotY, z: 0 }, viewMode }));
       }, BOT_MOVE_INTERVAL);
 
       // Schedule random disconnect
