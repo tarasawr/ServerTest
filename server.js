@@ -1039,6 +1039,23 @@ function isInsideWithMargin(px, pz, poly, margin) {
   return true;
 }
 
+/** Filter rooms to indoor only: find median center, keep rooms within 15 units of it. */
+function filterIndoorRooms(rooms) {
+  if (rooms.length <= 1) return rooms;
+  const centers = rooms.map(r => polyCenter(r));
+  // Median of centers (more robust than mean against outdoor outliers)
+  const xs = centers.map(c => c.x).sort((a, b) => a - b);
+  const zs = centers.map(c => c.z).sort((a, b) => a - b);
+  const mid = Math.floor(centers.length / 2);
+  const medX = xs[mid], medZ = zs[mid];
+  const maxDist = 15; // rooms beyond 15 units from median are outdoor/outliers
+  const indoor = rooms.filter((r, i) => {
+    const dx = centers[i].x - medX, dz = centers[i].z - medZ;
+    return Math.sqrt(dx * dx + dz * dz) <= maxDist;
+  });
+  return indoor.length > 0 ? indoor : [rooms[0]]; // fallback to first room
+}
+
 // Per-session bot manager: randomly connects/disconnects bots to simulate real players
 const BOT_MIN_ONLINE_SEC = 15;   // min time bot stays connected
 const BOT_MAX_ONLINE_SEC = 60;   // max time bot stays connected
@@ -1052,11 +1069,10 @@ function spawnSessionBots(inviteCode, projectXml) {
   if (BOT_COUNT <= 0) return;
   if (sessionBotManagers.has(inviteCode)) return; // already managing
 
-  const rooms = parseRoomsFromXml(projectXml || '');
-  log('Bots', `Parsed ${rooms.length} room(s), managing ${BOT_COUNT} bot slots for invite: ${inviteCode}`);
-
-  // Spawn bots in room centers (not at owner position — owner may be in 2D with camera far above)
-  // Each bot picks a random room center as starting point
+  const allRooms = parseRoomsFromXml(projectXml || '');
+  const rooms = filterIndoorRooms(allRooms);
+  log('Bots', `Parsed ${allRooms.length} room(s), ${rooms.length} indoor, managing ${BOT_COUNT} bot slots for invite: ${inviteCode}`);
+  for (const r of rooms) { const c = polyCenter(r); log('Bots', `  Indoor room: center=(${c.x.toFixed(1)}, ${c.z.toFixed(1)}), area=${polyArea(r).toFixed(1)}`); }
 
   const manager = { slots: [], managerTimer: null, stopped: false };
   sessionBotManagers.set(inviteCode, manager);
@@ -1089,18 +1105,8 @@ function connectBot(slot, inviteCode, rooms) {
   const botWs = new WebSocket(`ws://localhost:${PORT}`);
   slot.botWs = botWs;
 
-  // Pick indoor rooms only — exclude the farthest room (outdoor/largest)
-  // Sort by distance from origin, drop the last one if 3+ rooms
-  let currentRoom = null;
-  const nearRooms = rooms.length > 0
-    ? [...rooms].sort((a, b) => {
-        const ca = polyCenter(a), cb = polyCenter(b);
-        return (ca.x * ca.x + ca.z * ca.z) - (cb.x * cb.x + cb.z * cb.z);
-      }).slice(0, Math.max(1, rooms.length - 1))
-    : [];
-  if (nearRooms.length > 0) {
-    currentRoom = nearRooms[slot.index % nearRooms.length];
-  }
+  // Rooms already filtered to indoor in spawnSessionBots
+  let currentRoom = rooms.length > 0 ? rooms[slot.index % rooms.length] : null;
   const spawn = currentRoom ? randInPoly(currentRoom) : { x: 0, z: 0 };
   let x = spawn.x, y = 0, z = spawn.z;
   let dirX = (Math.random() - 0.5) * 2, dirZ = (Math.random() - 0.5) * 2;
@@ -1149,8 +1155,8 @@ function connectBot(slot, inviteCode, rooms) {
           pauseTicks--;
           if (pauseTicks <= 0) paused = false;
         } else {
-          if (nearRooms.length > 1 && Math.random() < BOT_ROOM_CHANGE) {
-            currentRoom = nearRooms[Math.floor(Math.random() * nearRooms.length)];
+          if (rooms.length > 1 && Math.random() < BOT_ROOM_CHANGE) {
+            currentRoom = rooms[Math.floor(Math.random() * rooms.length)];
             const p = randInPoly(currentRoom); x = p.x; z = p.z;
           }
           if (Math.random() < BOT_DIR_CHANGE) {
