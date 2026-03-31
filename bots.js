@@ -144,10 +144,15 @@ class Bot {
     this.playerId = null;
     this.alive = true;
     this.moveTimer = null;
-    this.rooms = rooms;
+    // Use indoor rooms only — exclude the farthest room (outdoor)
+    this.rooms = rooms.length > 0
+      ? [...rooms].sort((a, b) => {
+          const ca = polygonCenter(a), cb = polygonCenter(b);
+          return (ca.x * ca.x + ca.z * ca.z) - (cb.x * cb.x + cb.z * cb.z);
+        }).slice(0, Math.max(1, rooms.length - 1))
+      : [];
 
-    // Pick a random room
-    this.currentRoom = rooms.length > 0 ? rooms[index % rooms.length] : null;
+    this.currentRoom = this.rooms.length > 0 ? this.rooms[index % this.rooms.length] : null;
 
     // Spawn inside room or at origin
     const spawn = this.currentRoom ? randomPointInPolygon(this.currentRoom) : { x: 0, z: 0 };

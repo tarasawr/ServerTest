@@ -1089,12 +1089,18 @@ function connectBot(slot, inviteCode, rooms) {
   const botWs = new WebSocket(`ws://localhost:${PORT}`);
   slot.botWs = botWs;
 
-  // Pick a random room and spawn inside it
+  // Pick indoor rooms only — exclude the farthest room (outdoor/largest)
+  // Sort by distance from origin, drop the last one if 3+ rooms
   let currentRoom = null;
-  if (rooms.length > 0) {
-    currentRoom = rooms[slot.index % rooms.length];
+  const nearRooms = rooms.length > 0
+    ? [...rooms].sort((a, b) => {
+        const ca = polyCenter(a), cb = polyCenter(b);
+        return (ca.x * ca.x + ca.z * ca.z) - (cb.x * cb.x + cb.z * cb.z);
+      }).slice(0, Math.max(1, rooms.length - 1))
+    : [];
+  if (nearRooms.length > 0) {
+    currentRoom = nearRooms[slot.index % nearRooms.length];
   }
-
   const spawn = currentRoom ? randInPoly(currentRoom) : { x: 0, z: 0 };
   let x = spawn.x, y = 0, z = spawn.z;
   let dirX = (Math.random() - 0.5) * 2, dirZ = (Math.random() - 0.5) * 2;
@@ -1143,8 +1149,8 @@ function connectBot(slot, inviteCode, rooms) {
           pauseTicks--;
           if (pauseTicks <= 0) paused = false;
         } else {
-          if (rooms.length > 1 && Math.random() < BOT_ROOM_CHANGE) {
-            currentRoom = rooms[Math.floor(Math.random() * rooms.length)];
+          if (nearRooms.length > 1 && Math.random() < BOT_ROOM_CHANGE) {
+            currentRoom = nearRooms[Math.floor(Math.random() * nearRooms.length)];
             const p = randInPoly(currentRoom); x = p.x; z = p.z;
           }
           if (Math.random() < BOT_DIR_CHANGE) {
