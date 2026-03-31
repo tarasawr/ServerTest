@@ -1054,17 +1054,8 @@ function spawnSessionBots(inviteCode, projectXml) {
   const rooms = parseRoomsFromXml(projectXml || '');
   log('Bots', `Parsed ${rooms.length} room(s), managing ${BOT_COUNT} bot slots for invite: ${inviteCode}`);
 
-  // Capture owner's spawn position (first player's position when bots start)
-  let spawnPos = { x: 0, y: 0, z: 0 };
-  const session = sessions.get(inviteCode);
-  if (session) {
-    for (const [, p] of session.players) {
-      if (!clients.get(p.ws)?.isBot) {
-        spawnPos = { ...p.position };
-        break;
-      }
-    }
-  }
+  // Spawn bots in room centers (not at owner position — owner may be in 2D with camera far above)
+  // Each bot picks a random room center as starting point
 
   const manager = { slots: [], managerTimer: null, stopped: false };
   sessionBotManagers.set(inviteCode, manager);
@@ -1075,7 +1066,7 @@ function spawnSessionBots(inviteCode, projectXml) {
     manager.slots.push(slot);
     // Stagger initial connections
     const initialDelay = i * 2000 + Math.random() * 3000;
-    slot.reconnectTimer = setTimeout(() => connectBot(slot, inviteCode, rooms, spawnPos), initialDelay);
+    slot.reconnectTimer = setTimeout(() => connectBot(slot, inviteCode, rooms), initialDelay);
   }
 
   // Periodic check: stop manager if session gone or no humans
@@ -1087,7 +1078,7 @@ function spawnSessionBots(inviteCode, projectXml) {
   }, 5000);
 }
 
-function connectBot(slot, inviteCode, rooms, spawnPos) {
+function connectBot(slot, inviteCode, rooms) {
   if (slot.botWs) return; // already connected
 
   const session = sessions.get(inviteCode);
@@ -1097,16 +1088,14 @@ function connectBot(slot, inviteCode, rooms, spawnPos) {
   const botWs = new WebSocket(`ws://localhost:${PORT}`);
   slot.botWs = botWs;
 
+  // Pick a random room and spawn inside it
   let currentRoom = null;
   if (rooms.length > 0) {
-    let minArea = Infinity;
-    for (const r of rooms) {
-      const a = polyArea(r);
-      if (a < minArea) { minArea = a; currentRoom = r; }
-    }
+    currentRoom = rooms[slot.index % rooms.length];
   }
 
-  let x = spawnPos.x, y = spawnPos.y, z = spawnPos.z;
+  const spawn = currentRoom ? randInPoly(currentRoom) : { x: 0, z: 0 };
+  let x = spawn.x, y = 0, z = spawn.z;
   let dirX = (Math.random() - 0.5) * 2, dirZ = (Math.random() - 0.5) * 2;
   let len = Math.sqrt(dirX * dirX + dirZ * dirZ) || 1; dirX /= len; dirZ /= len;
   let rotY = Math.random() * 360;
@@ -1136,20 +1125,6 @@ function connectBot(slot, inviteCode, rooms, spawnPos) {
     }
 
     if (msg.type === 'session_state') {
-      // Find room containing spawn position
-      if (rooms.length > 0) {
-        let bestRoom = null, bestArea = Infinity;
-        for (const r of rooms) {
-          if (ptInPoly(x, z, r)) {
-            const area = polyArea(r);
-            if (area < bestArea) { bestArea = area; bestRoom = r; }
-          }
-        }
-        if (bestRoom) currentRoom = bestRoom;
-      }
-      if (currentRoom && !isInsideWithMargin(x, z, currentRoom, BOT_WALL_MARGIN)) {
-        const p = randInPoly(currentRoom); x = p.x; z = p.z;
-      }
       log('Bots', `${name} connected at (${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})`);
 
       slot.moveTimer = setInterval(() => {
@@ -1208,7 +1183,7 @@ function connectBot(slot, inviteCode, rooms, spawnPos) {
           disconnectBot(slot);
           // Schedule reconnect
           const offlineTime = randBetween(BOT_MIN_OFFLINE_SEC, BOT_MAX_OFFLINE_SEC) * 1000;
-          slot.reconnectTimer = setTimeout(() => connectBot(slot, inviteCode, rooms, spawnPos), offlineTime);
+          slot.reconnectTimer = setTimeout(() => connectBot(slot, inviteCode, rooms), offlineTime);
         }
       }, onlineTime);
     }
