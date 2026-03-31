@@ -134,6 +134,22 @@ function fetchProjectXml(invite) {
   });
 }
 
+/** Filter rooms to indoor only: find median center, keep rooms within 15 units. */
+function filterIndoorRooms(rooms) {
+  if (rooms.length <= 1) return rooms;
+  const centers = rooms.map(r => polygonCenter(r));
+  const xs = centers.map(c => c.x).sort((a, b) => a - b);
+  const zs = centers.map(c => c.z).sort((a, b) => a - b);
+  const mid = Math.floor(centers.length / 2);
+  const medX = xs[mid], medZ = zs[mid];
+  const maxDist = 15;
+  const indoor = rooms.filter((r, i) => {
+    const dx = centers[i].x - medX, dz = centers[i].z - medZ;
+    return Math.sqrt(dx * dx + dz * dz) <= maxDist;
+  });
+  return indoor.length > 0 ? indoor : [rooms[0]];
+}
+
 // --- Bot ---
 
 class Bot {
@@ -144,14 +160,8 @@ class Bot {
     this.playerId = null;
     this.alive = true;
     this.moveTimer = null;
-    // Use indoor rooms only — exclude the farthest room (outdoor)
-    this.rooms = rooms.length > 0
-      ? [...rooms].sort((a, b) => {
-          const ca = polygonCenter(a), cb = polygonCenter(b);
-          return (ca.x * ca.x + ca.z * ca.z) - (cb.x * cb.x + cb.z * cb.z);
-        }).slice(0, Math.max(1, rooms.length - 1))
-      : [];
-
+    // Use indoor rooms only — filter out outliers far from median
+    this.rooms = filterIndoorRooms(rooms);
     this.currentRoom = this.rooms.length > 0 ? this.rooms[index % this.rooms.length] : null;
 
     // Spawn inside room or at origin
