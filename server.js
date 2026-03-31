@@ -1066,19 +1066,31 @@ function isInsideWithMargin(px, pz, poly, margin) {
 }
 
 /** Filter rooms to indoor only.
- *  A room is indoor if its center is inside another room's polygon (it's enclosed).
- *  Outdoor rooms are not contained by any other room. */
+ *  1. Find the outdoor room = the one containing the most other room centers
+ *  2. Keep only rooms whose center is inside the outdoor (excluding outdoor itself)
+ *  This excludes both the outdoor and any stray polygons outside the building. */
 function filterIndoorRooms(rooms) {
   if (rooms.length <= 1) return rooms;
-  const indoor = rooms.filter((room, i) => {
-    const c = polyCenter(room);
+  const centers = rooms.map(r => polyCenter(r));
+
+  // Find outdoor: room containing the most other room centers
+  let outdoorIdx = 0, maxContained = -1;
+  for (let i = 0; i < rooms.length; i++) {
+    let count = 0;
     for (let j = 0; j < rooms.length; j++) {
-      if (j === i) continue;
-      if (ptInPoly(c.x, c.z, rooms[j])) return true; // center is inside another room → indoor
+      if (j !== i && ptInPoly(centers[j].x, centers[j].z, rooms[i])) count++;
     }
-    return false;
+    if (count > maxContained) { maxContained = count; outdoorIdx = i; }
+  }
+
+  // Keep rooms inside outdoor, excluding outdoor itself
+  const indoor = rooms.filter((r, i) => {
+    if (i === outdoorIdx) return false;
+    return ptInPoly(centers[i].x, centers[i].z, rooms[outdoorIdx]);
   });
-  log('Bots', `filterIndoorRooms: ${indoor.length}/${rooms.length} enclosed rooms`);
+
+  const oc = centers[outdoorIdx];
+  log('Bots', `filterIndoorRooms: outdoor=[${outdoorIdx}] center=(${oc.x.toFixed(1)},${oc.z.toFixed(1)}) contains ${maxContained} rooms, kept ${indoor.length}/${rooms.length}`);
   return indoor.length > 0 ? indoor : rooms;
 }
 
