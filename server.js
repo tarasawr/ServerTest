@@ -742,6 +742,40 @@ function handleWallRemove(ws, client, msg) {
   log('Wall', `remove "${msg.wallId}" by p${client.playerId} → ${n} peers`);
 }
 
+// --- Room add/remove ---
+
+function handleRoomAdd(ws, client, msg) {
+  const session = getSession(ws, client, true);
+  if (!session) return;
+  const role = session.players.get(client.playerId)?.role;
+  if (!canEdit(role)) {
+    log('Denied', `player=${client.playerId} room_add (role: ${role})`);
+    return;
+  }
+  session.sequenceNumber++;
+  const n = broadcastToSession(session, ws, {
+    type: 'room_add', playerId: client.playerId,
+    roomId: msg.roomId, roomXml: msg.roomXml
+  });
+  log('Room', `add "${(msg.roomId || '').slice(-6)}" by p${client.playerId} → ${n} peers`);
+}
+
+function handleRoomRemove(ws, client, msg) {
+  const session = getSession(ws, client, true);
+  if (!session) return;
+  const role = session.players.get(client.playerId)?.role;
+  if (!canEdit(role)) {
+    log('Denied', `player=${client.playerId} room_remove (role: ${role})`);
+    return;
+  }
+  session.sequenceNumber++;
+  const n = broadcastToSession(session, ws, {
+    type: 'room_remove', playerId: client.playerId,
+    roomId: msg.roomId
+  });
+  log('Room', `remove "${(msg.roomId || '').slice(-6)}" by p${client.playerId} → ${n} peers`);
+}
+
 // --- Furniture locking ---
 
 // Lock key format: "furnitureId:property" (per-property locking)
@@ -955,6 +989,8 @@ wss.on('connection', (ws) => {
       case 'wall_drag': handleWallDrag(ws, client, msg); break;
       case 'wall_add': handleWallAdd(ws, client, msg); break;
       case 'wall_remove': handleWallRemove(ws, client, msg); break;
+      case 'room_add': handleRoomAdd(ws, client, msg); break;
+      case 'room_remove': handleRoomRemove(ws, client, msg); break;
       case 'furniture_lock': handleFurnitureLock(ws, client, msg); break;
       case 'furniture_unlock': handleFurnitureUnlock(ws, client, msg); break;
       case 'update_state':   handleUpdateState(ws, client, msg); break;
