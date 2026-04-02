@@ -87,6 +87,31 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // --- Test coordination (GET/POST /test) ---
+  if (url.pathname === '/test') {
+    if (req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(testCoordination));
+      return;
+    }
+    if (req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', () => {
+        try {
+          testCoordination = JSON.parse(body);
+          log('Test', `Coordination updated: phase=${testCoordination.phase}`);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (e) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      });
+      return;
+    }
+  }
+
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end(`Multiplayer server OK. Sessions: ${sessions.size}, Clients: ${clients.size}`);
 });
@@ -98,6 +123,7 @@ const wss = new WebSocket.Server({ server });
 let nextPlayerId = 1;
 const sessions = new Map();  // inviteCode -> Session
 const clients = new Map();   // WebSocket -> ClientState
+let testCoordination = { phase: 'idle' };  // Test coordination state (GET/POST /test)
 
 // --- Player colors (10 distinct colors from design) ---
 
