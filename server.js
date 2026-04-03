@@ -1,5 +1,6 @@
 const http = require('http');
 const WebSocket = require('ws');
+const projectsModule = require('./projects');
 
 const PORT = process.env.PORT || 3000;
 const LEGACY_INVITE = '__legacy__';
@@ -111,6 +112,8 @@ const server = http.createServer((req, res) => {
       return;
     }
   }
+
+  if (projectsModule.handleRequest(req, res, url, sessions)) return;
 
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end(`Multiplayer server OK. Sessions: ${sessions.size}, Clients: ${clients.size}`);
@@ -318,6 +321,7 @@ function handleCreateSession(ws, client, msg) {
     id: sessionId, inviteCode, ownerId: client.playerId,
     ownerUserId: msg.userId || null, projectXml: msg.projectXml || '',
     linkPermission, sequenceNumber: 0,
+    projectId: null,
     players: new Map(),
     entityState: new Map()
   };
@@ -861,6 +865,7 @@ function handleUpdateState(ws, client, msg) {
   }
   const xmlLen = (msg.projectXml || '').length;
   session.projectXml = msg.projectXml || session.projectXml;
+  projectsModule.onXmlUpdated(session.projectId, session.projectXml);
   log('Session', `${session.id} state updated by player=${client.playerId} (xml: ${xmlLen} chars, seq: ${session.sequenceNumber})`);
 }
 

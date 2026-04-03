@@ -7,6 +7,18 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "ws": "^8.16.0"
-  }
+    "ws": "^8.20.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tarasawr/ServerTest.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/tarasawr/ServerTest/issues"
+  },
+  "homepage": "https://github.com/tarasawr/ServerTest#readme"
 }
