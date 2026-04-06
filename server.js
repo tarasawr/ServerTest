@@ -722,7 +722,9 @@ function handleWallAdd(ws, client, msg) {
     type: 'wall_add', playerId: client.playerId,
     wallId: msg.wallId,
     sx: msg.sx, sy: msg.sy, ex: msg.ex, ey: msg.ey,
-    height: msg.height, thickness: msg.thickness
+    height: msg.height, thickness: msg.thickness,
+    frontId: msg.frontId || '', backId: msg.backId || '',
+    leftId: msg.leftId || '', rightId: msg.rightId || ''
   });
 
   log('Wall', `add "${msg.wallId}" (${msg.sx?.toFixed(2)},${msg.sy?.toFixed(2)})-(${msg.ex?.toFixed(2)},${msg.ey?.toFixed(2)}) by p${client.playerId} → ${n} peers`);
