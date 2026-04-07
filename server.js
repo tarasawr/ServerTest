@@ -668,11 +668,13 @@ function handleDomainChange(ws, client, msg) {
   const n = broadcastToSession(session, ws, {
     type: 'domain_change', playerId: client.playerId,
     targetId: msg.targetId,
+    targetDebug: msg.targetDebug || '',
     changes: winningChanges
   });
 
   const names = winningChanges.map(c => c.name).join(',');
-  log('Domain', `change target="${msg.targetId}" props=[${names}] by player=${client.playerId} → ${n} peers`);
+  const debug = msg.targetDebug ? ` [${msg.targetDebug}]` : '';
+  log('Domain', `change target="${msg.targetId}"${debug} props=[${names}] by player=${client.playerId} → ${n} peers`);
 }
 
 // --- Wall drag ---
