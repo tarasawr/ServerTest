@@ -141,9 +141,21 @@
 
 ---
 
+### `DELETE /projects/:id/users`
+
+Удалить **всех** участников (кроме владельца) из проекта. **Только владелец.**
+
+**Тело:** `{ "ownerUserId": "<id владельца>" }` — должен совпадать с `ownerUserId` проекта.
+
+**Успех (200):** `{ "ok": true, "removedCount": N }` — `removedCount` — количество удалённых участников (0, если никого, кроме владельца, не было).
+
+**Ошибки:** `403` — не владелец; `404` — проект не найден.
+
+---
+
 ### `DELETE /projects/:id/users/:uid`
 
-Удалить участника из проекта. **Только владелец.**
+Удалить конкретного участника из проекта. **Только владелец.**
 
 **Тело:** `{ "ownerUserId": "<id владельца>" }` — должен совпадать с `ownerUserId` проекта.
 
@@ -188,5 +200,6 @@
 | `SetProjectGlobalRole` | `PUT /projects/{id}/globalRole` |
 | `SetUserRole` | `PUT /projects/{id}/users/{uid}/role` |
 | `RemoveUser` | `DELETE /projects/{id}/users/{uid}` |
+| `RemoveAllUsers` | `DELETE /projects/{id}/users` |
 | `GetProjectUsers` | `GET /projects/{id}/users` |
 | `LinkSessionToProject` | `PUT /sessions/{invite}/project` |

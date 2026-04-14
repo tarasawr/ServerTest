@@ -241,6 +241,31 @@ async function handlePutSync(req, res, projectId) {
   jsonOk(res, { ok: true, lastSyncDate });
 }
 
+async function handleDeleteAllUsers(req, res, projectId) {
+  if (!projects.has(projectId)) {
+    return jsonErr(res, 404, `Project ${projectId} not found`);
+  }
+  const proj = projects.get(projectId);
+
+  const body = await readBody(req);
+  const { ownerUserId } = body;
+
+  if (ownerUserId !== proj.ownerUserId) {
+    return jsonErr(res, 403, 'Only the owner can remove all users');
+  }
+
+  let removedCount = 0;
+  for (const [userId] of proj.users) {
+    if (userId !== proj.ownerUserId) {
+      proj.users.delete(userId);
+      removedCount++;
+    }
+  }
+
+  log('Projects', `All ${removedCount} non-owner users removed from project ${projectId} by owner`);
+  jsonOk(res, { ok: true, removedCount });
+}
+
 async function handleDeleteUser(req, res, projectId, userId) {
   if (!projects.has(projectId)) {
     return jsonErr(res, 404, `Project ${projectId} not found`);
@@ -325,11 +350,11 @@ function handleRequest(req, res, url, sessions) {
     return true;
   }
 
-  // GET /projects/:id/users
+  // GET|DELETE /projects/:id/users
   const usersM = p.match(/^\/projects\/([^\/]+)\/users$/);
-  if (usersM && req.method === 'GET') {
-    handleGetProjectUsers(res, usersM[1]);
-    return true;
+  if (usersM) {
+    if (req.method === 'GET') { handleGetProjectUsers(res, usersM[1]); return true; }
+    if (req.method === 'DELETE') { handleDeleteAllUsers(req, res, usersM[1]); return true; }
   }
 
   // PUT /projects/:id/globalRole
