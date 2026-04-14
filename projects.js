@@ -4,9 +4,11 @@
 // projectId → {
 //   projectId, ownerUserId, ownerName,
 //   projectXml, lastSyncDate,
+//   globalRole: 'can_view' | 'can_edit',    ← project-level default for all users
 //   users: Map<userId, { userId, name, avatarUrl, role, isGuest }>
+//   role: 'owner' | 'can_edit' | 'can_view' | null
+//   null role means "inherit from project globalRole"
 // }
-// role: 'owner' | 'can_edit' | 'can_view'
 
 const projects = new Map();
 
@@ -41,10 +43,25 @@ function readBody(req) {
   });
 }
 
-function serializeUsers(usersMap) {
+// Returns the effective role for a user: individual role if set, otherwise project globalRole.
+// Owner always returns 'owner'.
+function getEffectiveRole(proj, userId) {
+  const user = proj.users.get(userId);
+  if (!user) return proj.globalRole;
+  if (user.role === 'owner') return 'owner';
+  return user.role !== null ? user.role : proj.globalRole;
+}
+
+function serializeUsers(usersMap, proj) {
   const list = [];
   for (const [, u] of usersMap) {
-    list.push({ userId: u.userId, name: u.name, avatarUrl: u.avatarUrl, role: u.role, isGuest: u.isGuest });
+    list.push({
+      userId: u.userId,
+      name: u.name,
+      avatarUrl: u.avatarUrl,
+      role: getEffectiveRole(proj, u.userId),  // always non-null effective role
+      isGuest: u.isGuest
+    });
   }
   return list;
 }
@@ -76,6 +93,7 @@ async function handlePostProjects(req, res) {
     ownerName: ownerName || 'Unknown',
     projectXml: projectXml || '',
     lastSyncDate: new Date().toISOString(),
+    globalRole: 'can_view',
     users
   });
 
@@ -97,24 +115,24 @@ async function handleJoinProject(req, res, projectId) {
 
   const proj = projects.get(projectId);
 
-  // Already in project → return existing role
+  // Already in project → return effective role
   if (proj.users.has(userId)) {
-    const existing = proj.users.get(userId);
-    log('Projects', `User ${userId} already in project ${projectId} (role: ${existing.role})`);
-    return jsonOk(res, { ok: true, role: existing.role, alreadyMember: true });
+    const effectiveRole = getEffectiveRole(proj, userId);
+    log('Projects', `User ${userId} already in project ${projectId} (role: ${effectiveRole})`);
+    return jsonOk(res, { ok: true, role: effectiveRole, alreadyMember: true });
   }
 
   const user = {
     userId,
     name: name || (isGuest ? 'Guest' : 'Unknown'),
     avatarUrl: avatarUrl || '',
-    role: 'can_view',
+    role: null,   // inherits project globalRole
     isGuest: !!isGuest
   };
   proj.users.set(userId, user);
 
-  log('Projects', `User ${userId} (${user.name}) joined project ${projectId} as can_view`);
-  jsonOk(res, { ok: true, role: 'can_view' });
+  log('Projects', `User ${userId} (${user.name}) joined project ${projectId} (inherits globalRole: ${proj.globalRole})`);
+  jsonOk(res, { ok: true, role: proj.globalRole });
 }
 
 function handleGetProject(res, projectId) {
@@ -127,6 +145,7 @@ function handleGetProject(res, projectId) {
     ownerUserId: p.ownerUserId,
     ownerName: p.ownerName,
     lastSyncDate: p.lastSyncDate,
+    globalRole: p.globalRole,
     userCount: p.users.size
   });
 }
@@ -135,7 +154,11 @@ function handleGetProjectUsers(res, projectId) {
   if (!projects.has(projectId)) {
     return jsonErr(res, 404, `Project ${projectId} not found`);
   }
-  jsonOk(res, { users: serializeUsers(projects.get(projectId).users) });
+  const proj = projects.get(projectId);
+  jsonOk(res, {
+    globalRole: proj.globalRole,
+    users: serializeUsers(proj.users, proj)
+  });
 }
 
 function handleGetUserRole(res, projectId, userId) {
@@ -146,7 +169,7 @@ function handleGetUserRole(res, projectId, userId) {
   if (!proj.users.has(userId)) {
     return jsonErr(res, 404, `User ${userId} not in project ${projectId}`);
   }
-  jsonOk(res, { userId, role: proj.users.get(userId).role });
+  jsonOk(res, { userId, role: getEffectiveRole(proj, userId) });
 }
 
 function handleGetUserProjects(res, userId) {
@@ -156,7 +179,7 @@ function handleGetUserProjects(res, userId) {
       result.push({
         projectId: p.projectId,
         ownerName: p.ownerName,
-        role: p.users.get(userId).role,
+        role: getEffectiveRole(p, userId),
         lastSyncDate: p.lastSyncDate
       });
     }
@@ -172,6 +195,9 @@ async function handlePutUserRole(req, res, projectId, userId) {
   if (!proj.users.has(userId)) {
     return jsonErr(res, 404, `User ${userId} not in project ${projectId}`);
   }
+  if (userId === proj.ownerUserId) {
+    return jsonErr(res, 400, 'Cannot change the owner\'s role');
+  }
 
   const body = await readBody(req);
   const { role } = body;
@@ -182,6 +208,27 @@ async function handlePutUserRole(req, res, projectId, userId) {
   proj.users.get(userId).role = role;
   log('Projects', `Role of user ${userId} in project ${projectId} changed to ${role}`);
   jsonOk(res, { ok: true, role });
+}
+
+async function handlePutProjectGlobalRole(req, res, projectId) {
+  if (!projects.has(projectId)) {
+    return jsonErr(res, 404, `Project ${projectId} not found`);
+  }
+  const proj = projects.get(projectId);
+
+  const body = await readBody(req);
+  const { globalRole, ownerUserId } = body;
+
+  if (ownerUserId !== proj.ownerUserId) {
+    return jsonErr(res, 403, 'Only the owner can change the project global role');
+  }
+  if (!['can_view', 'can_edit'].includes(globalRole)) {
+    return jsonErr(res, 400, 'globalRole must be can_view or can_edit');
+  }
+
+  proj.globalRole = globalRole;
+  log('Projects', `Global role of project ${projectId} changed to ${globalRole} by owner ${ownerUserId}`);
+  jsonOk(res, { ok: true, globalRole });
 }
 
 async function handlePutSync(req, res, projectId) {
@@ -282,6 +329,13 @@ function handleRequest(req, res, url, sessions) {
   const usersM = p.match(/^\/projects\/([^\/]+)\/users$/);
   if (usersM && req.method === 'GET') {
     handleGetProjectUsers(res, usersM[1]);
+    return true;
+  }
+
+  // PUT /projects/:id/globalRole
+  const projGlobalRoleM = p.match(/^\/projects\/([^\/]+)\/globalRole$/);
+  if (projGlobalRoleM && req.method === 'PUT') {
+    handlePutProjectGlobalRole(req, res, projGlobalRoleM[1]);
     return true;
   }
 

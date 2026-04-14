@@ -9,6 +9,22 @@
 - Ошибки: JSON `{ "error": "message" }` с соответствующим HTTP-статусом.
 - Данные хранятся **в памяти** процесса Node (после перезапуска сервера очищаются).
 
+## Модель ролей
+
+Каждый проект имеет **глобальную роль** (`globalRole`) — настройку по умолчанию для всех участников.  
+Каждый участник может иметь **индивидуальную роль** (или не иметь — `null`).  
+**Эффективная роль** = индивидуальная роль (если задана) ИЛИ `globalRole` проекта.
+
+Все эндпоинты возвращают уже **вычисленную эффективную роль** — фронтенд не получает `null`.
+
+| Значение роли | Описание |
+|---------------|----------|
+| `owner` | Владелец (создатель проекта) |
+| `can_edit` | Может вносить изменения |
+| `can_view` | Только просмотр (умолчание `globalRole`) |
+
+---
+
 ## Эндпоинты
 
 ### `POST /projects`
@@ -25,7 +41,8 @@
 | `projectXml` | нет | XML снапшот проекта |
 
 **Успех (200):** `{ "ok": true, "projectId": "...", "shareUrl": "/projects/{projectId}" }`  
-`shareUrl` — **относительный** путь; полная ссылка = база + `shareUrl`.
+`shareUrl` — **относительный** путь; полная ссылка = база + `shareUrl`.  
+Новый проект создаётся с `globalRole: "can_view"`.
 
 **Ошибки:** `400` — нет `projectId` или `ownerUserId`.
 
@@ -35,13 +52,14 @@
 
 Список проектов, в которых участвует пользователь `:uid` (URL-декодирование применяется к сегменту).
 
-**Успех (200):** `{ "projects": [ { "projectId", "ownerName", "role", "lastSyncDate" }, ... ] }`
+**Успех (200):** `{ "projects": [ { "projectId", "ownerName", "role", "lastSyncDate" }, ... ] }`  
+`role` — эффективная роль пользователя в каждом проекте.
 
 ---
 
 ### `POST /projects/:id/join`
 
-Добавить пользователя в проект. Новым участникам выдаётся роль `can_view`. Уже существующий пользователь получает свою текущую роль.
+Добавить пользователя в проект. Новый участник добавляется **без индивидуальной роли** (наследует `globalRole`). Уже существующий пользователь получает свою текущую эффективную роль.
 
 **Тело:**
 
@@ -54,8 +72,8 @@
 
 **Успех (200):**
 
-- новый участник: `{ "ok": true, "role": "can_view" }`
-- уже в проекте: `{ "ok": true, "role": "<роль>", "alreadyMember": true }`
+- новый участник: `{ "ok": true, "role": "<globalRole проекта>" }`
+- уже в проекте: `{ "ok": true, "role": "<эффективная роль>", "alreadyMember": true }`
 
 **Ошибки:** `404` — проект не найден; `400` — нет `userId`.
 
@@ -65,9 +83,21 @@
 
 Метаданные проекта (без полного `projectXml` в ответе).
 
-**Успех (200):** `{ "projectId", "ownerUserId", "ownerName", "lastSyncDate", "userCount" }`
+**Успех (200):** `{ "projectId", "ownerUserId", "ownerName", "lastSyncDate", "globalRole", "userCount" }`
 
 **Ошибки:** `404` — проект не найден.
+
+---
+
+### `PUT /projects/:id/globalRole`
+
+Изменить глобальную роль проекта (настройка по умолчанию для всех участников без индивидуальной роли). **Только владелец.**
+
+**Тело:** `{ "globalRole": "can_view" | "can_edit", "ownerUserId": "<id владельца>" }`
+
+**Успех (200):** `{ "ok": true, "globalRole": "..." }`
+
+**Ошибки:** `400` — неверная роль; `403` — не владелец; `404` — проект не найден.
 
 ---
 
@@ -75,7 +105,14 @@
 
 Список всех участников.
 
-**Успех (200):** `{ "users": [ { "userId", "name", "avatarUrl", "role", "isGuest" }, ... ] }`
+**Успех (200):**
+```json
+{
+  "globalRole": "can_view",
+  "users": [ { "userId", "name", "avatarUrl", "role", "isGuest" }, ... ]
+}
+```
+`role` — эффективная роль каждого участника (индивидуальная или `globalRole`). Никогда не `null`.
 
 **Ошибки:** `404` — проект не найден.
 
@@ -83,7 +120,7 @@
 
 ### `GET /projects/:id/users/:uid/role`
 
-Роль конкретного участника (`:uid` URL-декодируется).
+Эффективная роль конкретного участника (`:uid` URL-декодируется).
 
 **Успех (200):** `{ "userId", "role" }`  
 Роли: `owner`, `can_edit`, `can_view`.
@@ -94,13 +131,13 @@
 
 ### `PUT /projects/:id/users/:uid/role`
 
-Смена роли участника. Нельзя таким образом «назначить» владельца — только `can_view` или `can_edit`.
+Установить **индивидуальную** роль участника. Нельзя изменить роль владельца. Только `can_view` или `can_edit`.
 
 **Тело:** `{ "role": "can_view" | "can_edit" }`
 
 **Успех (200):** `{ "ok": true, "role": "..." }`
 
-**Ошибки:** `400` — неверная роль; `404` — проект или пользователь не найден.
+**Ошибки:** `400` — неверная роль или попытка изменить роль владельца; `404` — проект или пользователь не найден.
 
 ---
 
@@ -140,4 +177,16 @@
 
 ## Связь с Unity
 
-Клиент Unity использует константу `MultiplayerConnection.HttpUrl` и класс `MultiplayerSharingApi` (`POST /projects`, `POST /projects/{id}/join`, `PUT /sessions/{invite}/project`) — те же контракты, что выше.
+Клиент Unity использует константу `MultiplayerConnection.HttpUrl` и класс `MultiplayerSharingApi`:
+
+| Метод C# | Эндпоинт |
+|----------|----------|
+| `RegisterProject` | `POST /projects` |
+| `JoinProject` | `POST /projects/{id}/join` |
+| `GetUserRole` | `GET /projects/{id}/users/{uid}/role` |
+| `GetProjectGlobalRole` | `GET /projects/{id}` |
+| `SetProjectGlobalRole` | `PUT /projects/{id}/globalRole` |
+| `SetUserRole` | `PUT /projects/{id}/users/{uid}/role` |
+| `RemoveUser` | `DELETE /projects/{id}/users/{uid}` |
+| `GetProjectUsers` | `GET /projects/{id}/users` |
+| `LinkSessionToProject` | `PUT /sessions/{invite}/project` |
