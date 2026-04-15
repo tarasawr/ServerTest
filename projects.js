@@ -81,6 +81,9 @@ async function handlePostProjects(req, res) {
     const p = projects.get(projectId);
     if (projectXml) p.projectXml = projectXml;
     p.lastSyncDate = new Date().toISOString();
+    // Backward compat: entries created before globalRole was introduced lack the field.
+    // JSON.stringify silently omits undefined fields, which breaks client parsing.
+    if (p.globalRole === undefined) p.globalRole = 'can_view';
     log('Projects', `Re-registered project ${projectId} by owner ${ownerUserId}`);
     return jsonOk(res, { ok: true, projectId, shareUrl: `/projects/${projectId}` });
   }
@@ -145,7 +148,7 @@ function handleGetProject(res, projectId) {
     ownerUserId: p.ownerUserId,
     ownerName: p.ownerName,
     lastSyncDate: p.lastSyncDate,
-    globalRole: p.globalRole,
+    globalRole: p.globalRole || 'can_view',  // fallback for entries without globalRole
     userCount: p.users.size
   });
 }
