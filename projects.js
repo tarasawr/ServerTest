@@ -311,6 +311,18 @@ async function handleDeleteUser(req, res, projectId, userId) {
   jsonOk(res, { ok: true });
 }
 
+function handleGetProjectSession(res, projectId, sessions) {
+  if (!projects.has(projectId)) {
+    return jsonErr(res, 404, `Project ${projectId} not found`);
+  }
+  for (const [inviteCode, s] of sessions) {
+    if (s.projectId === projectId && s.players.size > 0) {
+      return jsonOk(res, { inviteCode });
+    }
+  }
+  jsonErr(res, 404, 'No active session for this project');
+}
+
 async function handleLinkSession(req, res, inviteCode, sessions) {
   const body = await readBody(req);
   const { projectId } = body;
@@ -389,6 +401,13 @@ function handleRequest(req, res, url, sessions) {
   const syncM = p.match(/^\/projects\/([^\/]+)\/sync$/);
   if (syncM && req.method === 'PUT') {
     handlePutSync(req, res, syncM[1]);
+    return true;
+  }
+
+  // GET /projects/:id/session — find active session linked to this project
+  const projSessionM = p.match(/^\/projects\/([^\/]+)\/session$/);
+  if (projSessionM && req.method === 'GET') {
+    handleGetProjectSession(res, projSessionM[1], sessions);
     return true;
   }
 
