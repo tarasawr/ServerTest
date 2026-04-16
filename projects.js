@@ -269,6 +269,24 @@ async function handleDeleteAllUsers(req, res, projectId) {
   jsonOk(res, { ok: true, removedCount });
 }
 
+async function handleDeleteProject(req, res, projectId) {
+  if (!projects.has(projectId)) {
+    return jsonErr(res, 404, `Project ${projectId} not found`);
+  }
+  const proj = projects.get(projectId);
+
+  const body = await readBody(req);
+  const { ownerUserId } = body;
+
+  if (ownerUserId !== proj.ownerUserId) {
+    return jsonErr(res, 403, 'Only the owner can delete the project');
+  }
+
+  projects.delete(projectId);
+  log('Projects', `Project ${projectId} deleted by owner ${ownerUserId}`);
+  jsonOk(res, { ok: true });
+}
+
 async function handleDeleteUser(req, res, projectId, userId) {
   if (!projects.has(projectId)) {
     return jsonErr(res, 404, `Project ${projectId} not found`);
@@ -374,11 +392,11 @@ function handleRequest(req, res, url, sessions) {
     return true;
   }
 
-  // GET /projects/:id
+  // GET|DELETE /projects/:id
   const projectM = p.match(/^\/projects\/([^\/]+)$/);
-  if (projectM && req.method === 'GET') {
-    handleGetProject(res, projectM[1]);
-    return true;
+  if (projectM) {
+    if (req.method === 'GET') { handleGetProject(res, projectM[1]); return true; }
+    if (req.method === 'DELETE') { handleDeleteProject(req, res, projectM[1]); return true; }
   }
 
   // PUT /sessions/:inviteCode/project
