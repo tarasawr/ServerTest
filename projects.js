@@ -1,5 +1,8 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
+
 // --- Projects database ---
 // projectId → {
 //   projectId, ownerUserId, ownerName,
@@ -11,6 +14,39 @@
 // }
 
 const projects = new Map();
+
+// --- Persistence ---
+
+const STORAGE_FILE = path.join(__dirname, 'projects-data.json');
+
+function saveToFile() {
+  try {
+    const arr = [];
+    for (const [, p] of projects) {
+      arr.push({ ...p, users: Array.from(p.users.values()) });
+    }
+    fs.writeFileSync(STORAGE_FILE, JSON.stringify(arr, null, 2));
+  } catch (e) {
+    log('Storage', `WARN: save failed: ${e.message}`);
+  }
+}
+
+function loadFromFile() {
+  try {
+    if (!fs.existsSync(STORAGE_FILE)) return;
+    const arr = JSON.parse(fs.readFileSync(STORAGE_FILE, 'utf8'));
+    for (const p of arr) {
+      const users = new Map();
+      for (const u of (p.users || [])) users.set(u.userId, u);
+      projects.set(p.projectId, { ...p, users });
+    }
+    log('Storage', `Loaded ${projects.size} project(s) from disk`);
+  } catch (e) {
+    log('Storage', `WARN: load failed: ${e.message}`);
+  }
+}
+
+loadFromFile();
 
 // --- Helpers ---
 
@@ -85,6 +121,7 @@ async function handlePostProjects(req, res) {
     // JSON.stringify silently omits undefined fields, which breaks client parsing.
     if (p.globalRole === undefined) p.globalRole = 'can_view';
     log('Projects', `Re-registered project ${projectId} by owner ${ownerUserId}`);
+    saveToFile();
     return jsonOk(res, { ok: true, projectId, shareUrl: `/projects/${projectId}` });
   }
 
@@ -101,6 +138,7 @@ async function handlePostProjects(req, res) {
   });
 
   log('Projects', `Registered project ${projectId} by owner ${ownerUserId}`);
+  saveToFile();
   jsonOk(res, { ok: true, projectId, shareUrl: `/projects/${projectId}` });
 }
 
@@ -135,6 +173,7 @@ async function handleJoinProject(req, res, projectId) {
   proj.users.set(userId, user);
 
   log('Projects', `User ${userId} (${user.name}) joined project ${projectId} (inherits globalRole: ${proj.globalRole})`);
+  saveToFile();
   jsonOk(res, { ok: true, role: proj.globalRole });
 }
 
@@ -210,6 +249,7 @@ async function handlePutUserRole(req, res, projectId, userId) {
 
   proj.users.get(userId).role = role;
   log('Projects', `Role of user ${userId} in project ${projectId} changed to ${role}`);
+  saveToFile();
   jsonOk(res, { ok: true, role });
 }
 
@@ -231,6 +271,7 @@ async function handlePutProjectGlobalRole(req, res, projectId) {
 
   proj.globalRole = globalRole;
   log('Projects', `Global role of project ${projectId} changed to ${globalRole} by owner ${ownerUserId}`);
+  saveToFile();
   jsonOk(res, { ok: true, globalRole });
 }
 
@@ -241,6 +282,7 @@ async function handlePutSync(req, res, projectId) {
   const lastSyncDate = new Date().toISOString();
   projects.get(projectId).lastSyncDate = lastSyncDate;
   log('Projects', `Sync date updated for project ${projectId}`);
+  saveToFile();
   jsonOk(res, { ok: true, lastSyncDate });
 }
 
@@ -266,6 +308,7 @@ async function handleDeleteAllUsers(req, res, projectId) {
   }
 
   log('Projects', `All ${removedCount} non-owner users removed from project ${projectId} by owner`);
+  saveToFile();
   jsonOk(res, { ok: true, removedCount });
 }
 
@@ -284,6 +327,7 @@ async function handleDeleteProject(req, res, projectId) {
 
   projects.delete(projectId);
   log('Projects', `Project ${projectId} deleted by owner ${ownerUserId}`);
+  saveToFile();
   jsonOk(res, { ok: true });
 }
 
@@ -308,6 +352,32 @@ async function handleDeleteUser(req, res, projectId, userId) {
 
   proj.users.delete(userId);
   log('Projects', `User ${userId} removed from project ${projectId} by owner`);
+  saveToFile();
+  jsonOk(res, { ok: true });
+}
+
+async function handleLeaveProject(req, res, projectId) {
+  if (!projects.has(projectId)) {
+    return jsonErr(res, 404, `Project ${projectId} not found`);
+  }
+  const proj = projects.get(projectId);
+
+  const body = await readBody(req);
+  const { userId } = body;
+
+  if (!userId) {
+    return jsonErr(res, 400, 'userId is required');
+  }
+  if (userId === proj.ownerUserId) {
+    return jsonErr(res, 400, 'Owner cannot leave the project');
+  }
+  if (!proj.users.has(userId)) {
+    return jsonErr(res, 404, `User ${userId} not in project ${projectId}`);
+  }
+
+  proj.users.delete(userId);
+  log('Projects', `User ${userId} left project ${projectId}`);
+  saveToFile();
   jsonOk(res, { ok: true });
 }
 
@@ -375,6 +445,13 @@ function handleRequest(req, res, url, sessions) {
   const joinM = p.match(/^\/projects\/([^\/]+)\/join$/);
   if (joinM && req.method === 'POST') {
     handleJoinProject(req, res, joinM[1]);
+    return true;
+  }
+
+  // POST /projects/:id/leave
+  const leaveM = p.match(/^\/projects\/([^\/]+)\/leave$/);
+  if (leaveM && req.method === 'POST') {
+    handleLeaveProject(req, res, leaveM[1]);
     return true;
   }
 
