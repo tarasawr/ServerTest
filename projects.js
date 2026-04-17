@@ -311,6 +311,14 @@ async function handleDeleteUser(req, res, projectId, userId) {
   jsonOk(res, { ok: true });
 }
 
+function handleGetProjectXml(res, projectId) {
+  if (!projects.has(projectId)) {
+    return jsonErr(res, 404, `Project ${projectId} not found`);
+  }
+  const p = projects.get(projectId);
+  jsonOk(res, { projectXml: p.projectXml || '' });
+}
+
 function handleGetProjectSession(res, projectId, sessions) {
   if (!projects.has(projectId)) {
     return jsonErr(res, 404, `Project ${projectId} not found`);
@@ -401,6 +409,13 @@ function handleRequest(req, res, url, sessions) {
   const syncM = p.match(/^\/projects\/([^\/]+)\/sync$/);
   if (syncM && req.method === 'PUT') {
     handlePutSync(req, res, syncM[1]);
+    return true;
+  }
+
+  // GET /projects/:id/xml — fetch stored project XML
+  const projXmlM = p.match(/^\/projects\/([^\/]+)\/xml$/);
+  if (projXmlM && req.method === 'GET') {
+    handleGetProjectXml(res, projXmlM[1]);
     return true;
   }
 
