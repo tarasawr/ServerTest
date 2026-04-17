@@ -386,7 +386,7 @@ function handleJoinSession(ws, client, msg) {
   send(ws, {
     type: 'session_state', projectXml: session.projectXml,
     sequenceNumber: session.sequenceNumber, presence, role,
-    playerId: client.playerId
+    playerId: client.playerId, inviteCode: session.inviteCode
   });
 
   broadcastToSession(session, ws, {
