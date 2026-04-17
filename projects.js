@@ -315,8 +315,9 @@ function handleGetProjectXml(res, projectId) {
   if (!projects.has(projectId)) {
     return jsonErr(res, 404, `Project ${projectId} not found`);
   }
-  const p = projects.get(projectId);
-  jsonOk(res, { projectXml: p.projectXml || '' });
+  const xml = projects.get(projectId).projectXml || '';
+  res.writeHead(200, { 'Content-Type': 'text/xml; charset=utf-8' });
+  res.end(xml);
 }
 
 function handleGetProjectSession(res, projectId, sessions) {
