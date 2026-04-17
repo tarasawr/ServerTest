@@ -312,7 +312,7 @@ async function handleDeleteAllUsers(req, res, projectId) {
   jsonOk(res, { ok: true, removedCount });
 }
 
-async function handleDeleteProject(req, res, projectId) {
+async function handleDeleteProject(req, res, projectId, sessions) {
   if (!projects.has(projectId)) {
     return jsonErr(res, 404, `Project ${projectId} not found`);
   }
@@ -328,6 +328,23 @@ async function handleDeleteProject(req, res, projectId) {
   projects.delete(projectId);
   log('Projects', `Project ${projectId} deleted by owner ${ownerUserId}`);
   saveToFile();
+
+  // Terminate all active multiplayer sessions linked to this project
+  if (sessions) {
+    const closedMsg = JSON.stringify({ type: 'session_closed', reason: 'sharing_stopped' });
+    for (const [inviteCode, s] of sessions) {
+      if (s.projectId !== projectId) continue;
+      for (const [, player] of s.players) {
+        if (player.ws && player.ws.readyState === 1 /* OPEN */) {
+          try { player.ws.send(closedMsg); } catch (_) {}
+          player.ws.close();
+        }
+      }
+      sessions.delete(inviteCode);
+      log('Projects', `Session ${inviteCode} terminated (project ${projectId} sharing stopped)`);
+    }
+  }
+
   jsonOk(res, { ok: true });
 }
 
@@ -508,7 +525,7 @@ function handleRequest(req, res, url, sessions) {
   const projectM = p.match(/^\/projects\/([^\/]+)$/);
   if (projectM) {
     if (req.method === 'GET') { handleGetProject(res, projectM[1]); return true; }
-    if (req.method === 'DELETE') { handleDeleteProject(req, res, projectM[1]); return true; }
+    if (req.method === 'DELETE') { handleDeleteProject(req, res, projectM[1], sessions); return true; }
   }
 
   // PUT /sessions/:inviteCode/project
