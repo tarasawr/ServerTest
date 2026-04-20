@@ -817,8 +817,7 @@ wss.on('connection', (ws) => {
 
     const client = clients.get(ws);
 
-    // Compact incoming log (skip noisy move/pointer)
-    if (msg.type !== 'move' && msg.type !== 'pointer' && msg.type !== 'ping') {
+    if (msg.type !== 'move' && msg.type !== 'ping') {
       const fid = (msg.furnitureId || msg.targetId || '').slice(-6);
       const extra = fid ? ` id=..${fid}` : '';
       log('⬇ IN', `p${client.playerId} ${msg.type}${extra}${msg.committed ? ' COMMIT' : ''}`);
