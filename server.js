@@ -733,24 +733,6 @@ function handleUpdateState(ws, client, msg) {
   log('Session', `${session.id} state updated by player=${client.playerId} (xml: ${xmlLen} chars, seq: ${session.sequenceNumber})`);
 }
 
-function handleLinkPermissionChange(ws, client, msg) {
-  const session = getSession(ws, client, false);
-  if (!session) return;
-  if (client.playerId !== session.ownerId) {
-    log('Denied', `player=${client.playerId} link_permission_change (not owner)`);
-    return;
-  }
-
-  const permission = msg.linkPermission || 'edit';
-  session.linkPermission = permission;
-
-  const n = broadcastToSession(session, null, {
-    type: 'link_permission_changed', linkPermission: permission
-  });
-
-  log('Session', `${session.id} link permission → ${permission} by player=${client.playerId} → ${n} peers`);
-}
-
 // --- Chunk assembly per connection ---
 const chunkBuffers = new Map(); // ws → Map<messageId, { chunks: string[], received: number, total: number }>
 
@@ -854,7 +836,6 @@ wss.on('connection', (ws) => {
       case 'furniture_lock': handleFurnitureLock(ws, client, msg); break;
       case 'furniture_unlock': handleFurnitureUnlock(ws, client, msg); break;
       case 'update_state':   handleUpdateState(ws, client, msg); break;
-      case 'link_permission_change': handleLinkPermissionChange(ws, client, msg); break;
       case 'ping': send(ws, { type: 'pong' }); break;
       default:
         log('Warn', `Player ${client.playerId} sent unknown type: "${msg.type}"`);
