@@ -493,20 +493,6 @@ function handleMove(ws, client, msg) {
   });
 }
 
-function handleLog(ws, client, msg) {
-  const session = getSession(ws, client, true);
-  if (!session) return;
-
-  const senderPlayer = session.players.get(client.playerId);
-  const userName = senderPlayer ? senderPlayer.userName : `Player ${client.playerId}`;
-
-  // Broadcast logs to all other players in session
-  broadcastToSession(session, ws, {
-    type: 'remote_log', playerId: client.playerId, userName,
-    tag: msg.tag || '', text: msg.text || ''
-  });
-}
-
 function handleFurnitureUpdate(ws, client, msg) {
   const session = getSession(ws, client, true);
   if (!session) return;
@@ -831,7 +817,6 @@ wss.on('connection', (ws) => {
       case 'furniture_update': handleFurnitureUpdate(ws, client, msg); break;
       case 'domain_lifecycle': handleDomainLifecycle(ws, client, msg); break;
       case 'domain_change':  handleDomainChange(ws, client, msg); break;
-      case 'log':            handleLog(ws, client, msg); break;
       case 'furniture_lock': handleFurnitureLock(ws, client, msg); break;
       case 'furniture_unlock': handleFurnitureUnlock(ws, client, msg); break;
       case 'update_state':   handleUpdateState(ws, client, msg); break;
