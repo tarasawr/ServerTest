@@ -493,40 +493,6 @@ function handleMove(ws, client, msg) {
   });
 }
 
-function handlePointer(ws, client, msg) {
-  const session = getSession(ws, client, true);
-  if (!session) return;
-
-  broadcastToSession(session, ws, {
-    type: 'pointer', playerId: client.playerId,
-    origin: msg.origin, target: msg.target
-  });
-}
-
-function handleSelection(ws, client, msg) {
-  const session = getSession(ws, client, true);
-  if (!session) return;
-
-  broadcastToSession(session, ws, {
-    type: 'selection', playerId: client.playerId,
-    targetId: msg.targetId, selected: !!msg.selected
-  });
-}
-
-function handleLog(ws, client, msg) {
-  const session = getSession(ws, client, true);
-  if (!session) return;
-
-  const senderPlayer = session.players.get(client.playerId);
-  const userName = senderPlayer ? senderPlayer.userName : `Player ${client.playerId}`;
-
-  // Broadcast logs to all other players in session
-  broadcastToSession(session, ws, {
-    type: 'remote_log', playerId: client.playerId, userName,
-    tag: msg.tag || '', text: msg.text || ''
-  });
-}
-
 function handleFurnitureUpdate(ws, client, msg) {
   const session = getSession(ws, client, true);
   if (!session) return;
@@ -574,60 +540,53 @@ function handleFurnitureUpdate(ws, client, msg) {
   log('⬆ FU', `p${client.playerId} ${fid} ${c} → ${n} peers pos=${fmtPos(merged.position)}`);
 }
 
-// --- Domain add/remove (универсальная схема: Wall, Furniture, Opening, Room) ---
-// Тело объекта приходит в поле xml (результат Serialize()). Сервер это ретранслирует
-// как есть — никаких полей вроде furnitureId/wallId/roomId на уровне wire-протокола
-// больше нет, только uniqueId + kind.
+// --- Domain lifecycle (add + remove) ---
+// Универсальная схема для Wall/Furniture/Opening/Room. Поле op различает операции;
+// для op=add тело объекта приходит в xml (результат Serialize()), сервер ретранслирует
+// как есть. Никаких полей вроде furnitureId/wallId/roomId на wire-уровне нет —
+// только uniqueId + (для add) kind/parentId/xml/variationPath.
 
-function handleDomainAdd(ws, client, msg) {
+function handleDomainLifecycle(ws, client, msg) {
   const session = getSession(ws, client, true);
   if (!session) return;
   const role = session.players.get(client.playerId)?.role;
   if (!canEdit(role)) {
-    log('Denied', `player=${client.playerId} domain_add kind=${msg.kind} (role: ${role})`);
+    log('Denied', `player=${client.playerId} domain_lifecycle op=${msg.op} (role: ${role})`);
     return;
   }
   session.sequenceNumber++;
 
+  const idTail = (msg.uniqueId || '').slice(-6);
+
+  if (msg.op === 'remove') {
+    // Clean up LWW entity state (применяется и к мебели, и к пропертям).
+    if (session.entityState && msg.uniqueId) {
+      session.entityState.delete(msg.uniqueId);
+      session.entityState.delete(`var:${msg.uniqueId}`);
+      const prefix = `dom:${msg.uniqueId}:`;
+      for (const key of Array.from(session.entityState.keys())) {
+        if (key.startsWith(prefix)) session.entityState.delete(key);
+      }
+    }
+
+    const n = broadcastToSession(session, ws, {
+      type: 'domain_lifecycle', playerId: client.playerId,
+      op: 'remove', uniqueId: msg.uniqueId
+    });
+
+    log('Domain', `remove "${idTail}" by p${client.playerId} → ${n} peers (seq: ${session.sequenceNumber})`);
+    return;
+  }
+
+  // op === 'add' (default)
   const n = broadcastToSession(session, ws, {
-    type: 'domain_add', playerId: client.playerId,
-    uniqueId: msg.uniqueId, parentId: msg.parentId,
+    type: 'domain_lifecycle', playerId: client.playerId,
+    op: 'add', uniqueId: msg.uniqueId, parentId: msg.parentId,
     kind: msg.kind, xml: msg.xml,
     variationPath: msg.variationPath || ''
   });
 
-  const idTail = (msg.uniqueId || '').slice(-6);
   log('Domain', `add ${msg.kind} "${idTail}" by p${client.playerId} → ${n} peers (seq: ${session.sequenceNumber})`);
-}
-
-function handleDomainRemove(ws, client, msg) {
-  const session = getSession(ws, client, true);
-  if (!session) return;
-  const role = session.players.get(client.playerId)?.role;
-  if (!canEdit(role)) {
-    log('Denied', `player=${client.playerId} domain_remove (role: ${role})`);
-    return;
-  }
-  session.sequenceNumber++;
-
-  // Clean up LWW entity state (применяется и к мебели, и к пропертям).
-  if (session.entityState && msg.uniqueId) {
-    session.entityState.delete(msg.uniqueId);
-    session.entityState.delete(`var:${msg.uniqueId}`);
-    // Domain property LWW для этого id тоже больше не нужен.
-    const prefix = `dom:${msg.uniqueId}:`;
-    for (const key of Array.from(session.entityState.keys())) {
-      if (key.startsWith(prefix)) session.entityState.delete(key);
-    }
-  }
-
-  const n = broadcastToSession(session, ws, {
-    type: 'domain_remove', playerId: client.playerId,
-    uniqueId: msg.uniqueId
-  });
-
-  const idTail = (msg.uniqueId || '').slice(-6);
-  log('Domain', `remove "${idTail}" by p${client.playerId} → ${n} peers (seq: ${session.sequenceNumber})`);
 }
 
 function handleDomainChange(ws, client, msg) {
@@ -669,39 +628,6 @@ function handleDomainChange(ws, client, msg) {
   const names = winningChanges.map(c => c.name).join(',');
   const debug = msg.targetDebug ? ` [${msg.targetDebug}]` : '';
   log('Domain', `change target="${msg.targetId}"${debug} props=[${names}] by player=${client.playerId} → ${n} peers`);
-}
-
-// --- Wall drag ---
-
-function handleWallDrag(ws, client, msg) {
-  const session = getSession(ws, client, true);
-  if (!session) return;
-  const role = session.players.get(client.playerId)?.role;
-  if (!canEdit(role)) {
-    log('Denied', `player=${client.playerId} wall_drag (role: ${role})`);
-    return;
-  }
-
-  const wid = (msg.wallId || '').slice(-6);
-  const wallCount = msg.walls ? msg.walls.length : 0;
-
-  // Simple relay — no LWW needed for transient drag operations
-  const n = broadcastToSession(session, ws, {
-    type: 'wall_drag', playerId: client.playerId,
-    wallId: msg.wallId, phase: msg.phase,
-    clickZone: msg.clickZone, committed: msg.committed,
-    walls: msg.walls
-  });
-
-  // Log START/END only to avoid spam
-  if (msg.phase !== 'move') {
-    log('WallDrag', `${msg.phase} w=${wid} zone=${msg.clickZone} walls=${wallCount} committed=${msg.committed} by p${client.playerId} → ${n} peers`);
-  }
-
-  // Increment sequence on committed END (structural change)
-  if (msg.phase === 'end' && msg.committed) {
-    session.sequenceNumber++;
-  }
 }
 
 // --- Furniture locking ---
@@ -793,24 +719,6 @@ function handleUpdateState(ws, client, msg) {
   log('Session', `${session.id} state updated by player=${client.playerId} (xml: ${xmlLen} chars, seq: ${session.sequenceNumber})`);
 }
 
-function handleLinkPermissionChange(ws, client, msg) {
-  const session = getSession(ws, client, false);
-  if (!session) return;
-  if (client.playerId !== session.ownerId) {
-    log('Denied', `player=${client.playerId} link_permission_change (not owner)`);
-    return;
-  }
-
-  const permission = msg.linkPermission || 'edit';
-  session.linkPermission = permission;
-
-  const n = broadcastToSession(session, null, {
-    type: 'link_permission_changed', linkPermission: permission
-  });
-
-  log('Session', `${session.id} link permission → ${permission} by player=${client.playerId} → ${n} peers`);
-}
-
 // --- Chunk assembly per connection ---
 const chunkBuffers = new Map(); // ws → Map<messageId, { chunks: string[], received: number, total: number }>
 
@@ -895,8 +803,7 @@ wss.on('connection', (ws) => {
 
     const client = clients.get(ws);
 
-    // Compact incoming log (skip noisy move/pointer)
-    if (msg.type !== 'move' && msg.type !== 'pointer' && msg.type !== 'ping') {
+    if (msg.type !== 'move' && msg.type !== 'ping') {
       const fid = (msg.furnitureId || msg.targetId || '').slice(-6);
       const extra = fid ? ` id=..${fid}` : '';
       log('⬇ IN', `p${client.playerId} ${msg.type}${extra}${msg.committed ? ' COMMIT' : ''}`);
@@ -907,18 +814,12 @@ wss.on('connection', (ws) => {
       case 'join_session':   handleJoinSession(ws, client, msg); break;
       case 'leave_session':  leaveSession(ws, client); break;
       case 'move':           handleMove(ws, client, msg); break;
-      case 'pointer':        handlePointer(ws, client, msg); break;
       case 'furniture_update': handleFurnitureUpdate(ws, client, msg); break;
-      case 'domain_add':     handleDomainAdd(ws, client, msg); break;
-      case 'domain_remove':  handleDomainRemove(ws, client, msg); break;
+      case 'domain_lifecycle': handleDomainLifecycle(ws, client, msg); break;
       case 'domain_change':  handleDomainChange(ws, client, msg); break;
-      case 'selection':      handleSelection(ws, client, msg); break;
-      case 'log':            handleLog(ws, client, msg); break;
-      case 'wall_drag':      handleWallDrag(ws, client, msg); break;
       case 'furniture_lock': handleFurnitureLock(ws, client, msg); break;
       case 'furniture_unlock': handleFurnitureUnlock(ws, client, msg); break;
       case 'update_state':   handleUpdateState(ws, client, msg); break;
-      case 'link_permission_change': handleLinkPermissionChange(ws, client, msg); break;
       case 'ping': send(ws, { type: 'pong' }); break;
       default:
         log('Warn', `Player ${client.playerId} sent unknown type: "${msg.type}"`);
