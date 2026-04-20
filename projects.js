@@ -106,7 +106,7 @@ function serializeUsers(usersMap, proj) {
 
 async function handlePostProjects(req, res) {
   const body = await readBody(req);
-  const { projectId, ownerUserId, ownerName, projectXml } = body;
+  const { projectId, ownerUserId, ownerName, projectXml, projectTitle } = body;
 
   if (!projectId || !ownerUserId) {
     return jsonErr(res, 400, 'projectId and ownerUserId are required');
@@ -116,6 +116,7 @@ async function handlePostProjects(req, res) {
     // Re-registration: update owner info and XML (idempotent)
     const p = projects.get(projectId);
     if (projectXml) p.projectXml = projectXml;
+    if (projectTitle) p.projectTitle = projectTitle;
     p.lastSyncDate = new Date().toISOString();
     // Backward compat: entries created before globalRole was introduced lack the field.
     // JSON.stringify silently omits undefined fields, which breaks client parsing.
@@ -131,6 +132,7 @@ async function handlePostProjects(req, res) {
     projectId,
     ownerUserId,
     ownerName: ownerName || 'Unknown',
+    projectTitle: projectTitle || '',
     projectXml: projectXml || '',
     lastSyncDate: new Date().toISOString(),
     globalRole: 'can_view',
@@ -221,6 +223,7 @@ function handleGetUserProjects(res, userId) {
       result.push({
         projectId: p.projectId,
         ownerName: p.ownerName,
+        projectTitle: p.projectTitle || '',
         role: getEffectiveRole(p, userId),
         lastSyncDate: p.lastSyncDate
       });
