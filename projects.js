@@ -3,6 +3,9 @@
 const fs = require('fs');
 const path = require('path');
 
+const THUMBNAILS_DIR = path.join(__dirname, 'thumbnails');
+if (!fs.existsSync(THUMBNAILS_DIR)) fs.mkdirSync(THUMBNAILS_DIR);
+
 // --- Projects database ---
 // projectId → {
 //   projectId, ownerUserId, ownerName,
@@ -220,16 +223,55 @@ function handleGetUserProjects(res, userId) {
   const result = [];
   for (const [, p] of projects) {
     if (p.users.has(userId)) {
+      const thumbPath = path.join(THUMBNAILS_DIR, p.projectId + '.jpg');
       result.push({
         projectId: p.projectId,
         ownerName: p.ownerName,
         projectTitle: p.projectTitle || '',
         role: getEffectiveRole(p, userId),
-        lastSyncDate: p.lastSyncDate
+        lastSyncDate: p.lastSyncDate,
+        thumbnailUrl: fs.existsSync(thumbPath) ? `/projects/${p.projectId}/thumbnail` : ''
       });
     }
   }
   jsonOk(res, { projects: result });
+}
+
+async function handlePutThumbnail(req, res, projectId) {
+  if (!projects.has(projectId)) {
+    return jsonErr(res, 404, `Project ${projectId} not found`);
+  }
+
+  const chunks = [];
+  req.on('data', chunk => chunks.push(chunk));
+  req.on('end', () => {
+    const bytes = Buffer.concat(chunks);
+    if (bytes.length === 0) {
+      return jsonErr(res, 400, 'Empty thumbnail');
+    }
+    try {
+      fs.writeFileSync(path.join(THUMBNAILS_DIR, projectId + '.jpg'), bytes);
+      log('Projects', `Thumbnail saved for project ${projectId} (${bytes.length} bytes)`);
+      jsonOk(res, { ok: true });
+    } catch (e) {
+      log('Projects', `WARN: Failed to save thumbnail for ${projectId}: ${e.message}`);
+      jsonErr(res, 500, 'Failed to save thumbnail');
+    }
+  });
+}
+
+function handleGetThumbnail(res, projectId) {
+  const thumbPath = path.join(THUMBNAILS_DIR, projectId + '.jpg');
+  if (!fs.existsSync(thumbPath)) {
+    return jsonErr(res, 404, 'Thumbnail not found');
+  }
+  try {
+    const bytes = fs.readFileSync(thumbPath);
+    res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': bytes.length });
+    res.end(bytes);
+  } catch (e) {
+    jsonErr(res, 500, 'Failed to read thumbnail');
+  }
 }
 
 async function handlePutUserRole(req, res, projectId, userId) {
@@ -515,6 +557,14 @@ function handleRequest(req, res, url, sessions) {
   if (projXmlM && req.method === 'GET') {
     handleGetProjectXml(res, projXmlM[1]);
     return true;
+  }
+
+  // PUT /projects/:id/thumbnail — upload thumbnail
+  // GET /projects/:id/thumbnail — serve thumbnail
+  const thumbM = p.match(/^\/projects\/([^\/]+)\/thumbnail$/);
+  if (thumbM) {
+    if (req.method === 'PUT') { handlePutThumbnail(req, res, thumbM[1]); return true; }
+    if (req.method === 'GET') { handleGetThumbnail(res, thumbM[1]); return true; }
   }
 
   // GET /projects/:id/session — find active session linked to this project
