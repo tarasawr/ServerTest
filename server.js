@@ -490,17 +490,17 @@ function handleMove(ws, client, msg) {
   });
 }
 
-function handleFurnitureUpdate(ws, client, msg) {
+function handleDomainTransform(ws, client, msg) {
   const session = getSession(ws, client, true);
   if (!session) return;
   const role = session.players.get(client.playerId)?.role;
   if (!canEdit(role)) {
-    log('Denied', `player=${client.playerId} furniture_update (role: ${role})`);
+    log('Denied', `player=${client.playerId} domain_transform (role: ${role})`);
     return;
   }
 
   const ts = Date.now();
-  const entity = getEntityState(session, msg.furnitureId);
+  const entity = getEntityState(session, msg.id);
 
   let wins = 0;
   if (lwwMerge(entity, 'position', msg.position, ts))       wins |= PROP_POSITION;
@@ -508,20 +508,20 @@ function handleFurnitureUpdate(ws, client, msg) {
   if (lwwMerge(entity, 'scale', msg.scale, ts))             wins |= PROP_SCALE;
   if (lwwMerge(entity, 'planeOffset', msg.planeOffset, ts)) wins |= PROP_PLANE_OFFSET;
 
-  const fid = msg.furnitureId?.slice(-6) || '?';
+  const idTail = msg.id?.slice(-6) || '?';
   const c = msg.committed ? 'C' : 'D';
-  log('⬇ FU', `p${client.playerId} ${fid} ${c} pos=${fmtPos(msg.position)} wins=${fmtChanged(wins)}`);
+  log('⬇ DT', `p${client.playerId} ${idTail} ${c} pos=${fmtPos(msg.position)} wins=${fmtChanged(wins)}`);
 
   if (wins === 0 && !msg.committed) {
-    log('⬇ FU', `p${client.playerId} ${fid} SKIP (no wins)`);
+    log('⬇ DT', `p${client.playerId} ${idTail} SKIP (no wins)`);
     return;
   }
 
   if (msg.committed) session.sequenceNumber++;
 
   const merged = {
-    type: 'furniture_update',
-    furnitureId: msg.furnitureId,
+    type: 'domain_transform',
+    id: msg.id,
     position: entity.position?.v || msg.position,
     rotation: entity.rotation?.v || msg.rotation,
     scale: entity.scale?.v || msg.scale,
@@ -530,7 +530,7 @@ function handleFurnitureUpdate(ws, client, msg) {
   };
   const n = broadcastToSession(session, ws, merged);
 
-  log('⬆ FU', `p${client.playerId} ${fid} ${c} → ${n} peers pos=${fmtPos(merged.position)}`);
+  log('⬆ DT', `p${client.playerId} ${idTail} ${c} → ${n} peers pos=${fmtPos(merged.position)}`);
 }
 
 // --- Domain lifecycle (add + remove) ---
@@ -735,8 +735,8 @@ wss.on('connection', (ws) => {
     const client = clients.get(ws);
 
     if (msg.type !== 'move' && msg.type !== 'ping') {
-      const fid = (msg.furnitureId || msg.targetId || '').slice(-6);
-      const extra = fid ? ` id=..${fid}` : '';
+      const idTail = (msg.id || msg.targetId || '').slice(-6);
+      const extra = idTail ? ` id=..${idTail}` : '';
       log('⬇ IN', `p${client.playerId} ${msg.type}${extra}${msg.committed ? ' COMMIT' : ''}`);
     }
 
@@ -745,7 +745,7 @@ wss.on('connection', (ws) => {
       case 'join_session':   handleJoinSession(ws, client, msg); break;
       case 'leave_session':  leaveSession(ws, client); break;
       case 'move':           handleMove(ws, client, msg); break;
-      case 'furniture_update': handleFurnitureUpdate(ws, client, msg); break;
+      case 'domain_transform': handleDomainTransform(ws, client, msg); break;
       case 'domain_lifecycle': handleDomainLifecycle(ws, client, msg); break;
       case 'domain_change':  handleDomainChange(ws, client, msg); break;
       case 'update_state':   handleUpdateState(ws, client, msg); break;
