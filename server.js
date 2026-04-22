@@ -598,21 +598,34 @@ function handleDomainChange(ws, client, msg) {
     return;
   }
 
-  if (!msg.changes || !msg.changes.length) return;
+  if (!msg.targets || !msg.targets.length) return;
 
   const ts = Date.now();
-  const winningChanges = [];
+  const winningTargets = [];
 
-  for (const change of msg.changes) {
-    const entityId = `dom:${msg.targetId}:${change.name}`;
-    const entity = getEntityState(session, entityId);
-    if (lwwMerge(entity, 'value', change.value, ts)) {
-      winningChanges.push(change);
+  for (const target of msg.targets) {
+    if (!target.changes || !target.changes.length) continue;
+
+    const winningChanges = [];
+    for (const change of target.changes) {
+      const entityId = `dom:${target.targetId}:${change.name}`;
+      const entity = getEntityState(session, entityId);
+      if (lwwMerge(entity, 'value', change.value, ts)) {
+        winningChanges.push(change);
+      }
+    }
+
+    if (winningChanges.length > 0) {
+      winningTargets.push({
+        targetId: target.targetId,
+        targetDebug: target.targetDebug || '',
+        changes: winningChanges
+      });
     }
   }
 
-  if (winningChanges.length === 0) {
-    log('Domain', `all changes rejected (stale) target="${msg.targetId}" by player=${client.playerId}`);
+  if (winningTargets.length === 0) {
+    log('Domain', `all changes rejected (stale) by player=${client.playerId}`);
     return;
   }
 
@@ -620,14 +633,15 @@ function handleDomainChange(ws, client, msg) {
 
   const n = broadcastToSession(session, ws, {
     type: 'domain_change', playerId: client.playerId,
-    targetId: msg.targetId,
-    targetDebug: msg.targetDebug || '',
-    changes: winningChanges
+    targets: winningTargets
   });
 
-  const names = winningChanges.map(c => c.name).join(',');
-  const debug = msg.targetDebug ? ` [${msg.targetDebug}]` : '';
-  log('Domain', `change target="${msg.targetId}"${debug} props=[${names}] by player=${client.playerId} → ${n} peers`);
+  const summary = winningTargets.map(t => {
+    const names = t.changes.map(c => c.name).join(',');
+    const label = t.targetDebug || t.targetId;
+    return `${label}[${names}]`;
+  }).join(', ');
+  log('Domain', `change batch: ${winningTargets.length} targets by player=${client.playerId} → ${n} peers (${summary})`);
 }
 
 // --- Furniture locking ---
