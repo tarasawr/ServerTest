@@ -430,9 +430,6 @@ function leaveSession(ws, client) {
   client.sessionId = null;
   if (!session) return;
 
-  // Release all locks held by this player
-  releasePlayerLocks(session, client.playerId, ws);
-
   session.players.delete(client.playerId);
 
   // If no human players left, kick all bots
@@ -640,82 +637,6 @@ function handleDomainChange(ws, client, msg) {
   log('Domain', `change batch: ${winningTargets.length} targets by player=${client.playerId} → ${n} peers (${summary})`);
 }
 
-// --- Furniture locking ---
-
-// Lock key format: "furnitureId:property" (per-property locking)
-function lockKey(furnitureId, property) {
-  return `${furnitureId}:${property || 'position'}`;
-}
-
-function parseLockKey(key) {
-  const i = key.indexOf(':');
-  return { furnitureId: key.slice(0, i), property: key.slice(i + 1) };
-}
-
-function handleFurnitureLock(ws, client, msg) {
-  const session = getSession(ws, client, false);
-  if (!session) return;
-  const role = session.players.get(client.playerId)?.role;
-  if (!canEdit(role)) {
-    log('Denied', `player=${client.playerId} furniture_lock (role: ${role})`);
-    return;
-  }
-
-  if (!session.locks) session.locks = new Map();
-
-  const key = lockKey(msg.furnitureId, msg.property);
-  const existing = session.locks.get(key);
-  if (existing && existing !== client.playerId) {
-    send(ws, {
-      type: 'furniture_lock_denied', furnitureId: msg.furnitureId,
-      property: msg.property || 'position'
-    });
-    log('Lock', `denied "${msg.furnitureId}.${msg.property}" for player=${client.playerId} (held by ${existing})`);
-    return;
-  }
-
-  session.locks.set(key, client.playerId);
-
-  broadcastToSession(session, ws, {
-    type: 'furniture_locked', furnitureId: msg.furnitureId,
-    property: msg.property || 'position', playerId: client.playerId
-  });
-
-  log('Lock', `granted "${msg.furnitureId}.${msg.property}" to player=${client.playerId}`);
-}
-
-function handleFurnitureUnlock(ws, client, msg) {
-  const session = getSession(ws, client, false);
-  if (!session) return;
-
-  if (!session.locks) return;
-  const key = lockKey(msg.furnitureId, msg.property);
-  if (session.locks.get(key) !== client.playerId) return;
-
-  session.locks.delete(key);
-  broadcastToSession(session, ws, {
-    type: 'furniture_unlocked', furnitureId: msg.furnitureId,
-    property: msg.property || 'position'
-  });
-  log('Lock', `released "${msg.furnitureId}.${msg.property}" by player=${client.playerId}`);
-}
-
-function releasePlayerLocks(session, playerId, excludeWs) {
-  if (!session.locks) return;
-  const toRelease = [];
-  for (const [key, pid] of session.locks) {
-    if (pid === playerId) toRelease.push(key);
-  }
-  for (const key of toRelease) {
-    session.locks.delete(key);
-    const { furnitureId, property } = parseLockKey(key);
-    broadcastToSession(session, excludeWs, {
-      type: 'furniture_unlocked', furnitureId, property
-    });
-    log('Lock', `released "${furnitureId}.${property}" (was player=${playerId})`);
-  }
-}
-
 function handleUpdateState(ws, client, msg) {
   const session = getSession(ws, client, false);
   if (!session) return;
@@ -827,8 +748,6 @@ wss.on('connection', (ws) => {
       case 'furniture_update': handleFurnitureUpdate(ws, client, msg); break;
       case 'domain_lifecycle': handleDomainLifecycle(ws, client, msg); break;
       case 'domain_change':  handleDomainChange(ws, client, msg); break;
-      case 'furniture_lock': handleFurnitureLock(ws, client, msg); break;
-      case 'furniture_unlock': handleFurnitureUnlock(ws, client, msg); break;
       case 'update_state':   handleUpdateState(ws, client, msg); break;
       case 'ping': send(ws, { type: 'pong' }); break;
       default:
