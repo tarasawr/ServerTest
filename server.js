@@ -274,7 +274,7 @@ function getOrCreateLegacySession(ws, client) {
   const existing = [];
   for (const [, p] of session.players) {
     if (p.playerId !== client.playerId)
-      existing.push({ id: p.playerId, userName: p.userName, color: p.color, position: p.position, rotation: p.rotation, viewMode: p.viewMode || '3d' });
+      existing.push({ id: p.playerId, userName: p.userName, color: p.color, position: p.position, viewMode: p.viewMode || '3d' });
   }
   send(ws, { type: 'welcome', playerId: client.playerId, role: player.role, players: existing });
 
@@ -340,8 +340,8 @@ function handleCreateSession(ws, client, msg) {
   client.sessionId = sessionId;
 
   send(ws, {
-    type: 'session_created', inviteCode, sessionId,
-    sequenceNumber: 0, playerId: client.playerId,
+    type: 'session_created', inviteCode,
+    playerId: client.playerId,
     color: player.color
   });
 
@@ -385,7 +385,7 @@ function handleJoinSession(ws, client, msg) {
 
   send(ws, {
     type: 'session_state', projectXml: session.projectXml,
-    sequenceNumber: session.sequenceNumber, presence, role,
+    presence, role,
     playerId: client.playerId, inviteCode: session.inviteCode
   });
 
@@ -503,21 +503,18 @@ function handleFurnitureUpdate(ws, client, msg) {
   }
 
   const ts = Date.now();
-  const changed = msg.changed || PROP_ALL;
   const entity = getEntityState(session, msg.furnitureId);
 
-  // Per-property LWW merge
   let wins = 0;
-  if (changed & PROP_POSITION)     { if (lwwMerge(entity, 'position', msg.position, ts)) wins |= PROP_POSITION; }
-  if (changed & PROP_ROTATION)     { if (lwwMerge(entity, 'rotation', msg.rotation, ts)) wins |= PROP_ROTATION; }
-  if (changed & PROP_SCALE)        { if (lwwMerge(entity, 'scale', msg.scale, ts)) wins |= PROP_SCALE; }
-  if (changed & PROP_PLANE_OFFSET) { if (lwwMerge(entity, 'planeOffset', msg.planeOffset, ts)) wins |= PROP_PLANE_OFFSET; }
+  if (lwwMerge(entity, 'position', msg.position, ts))       wins |= PROP_POSITION;
+  if (lwwMerge(entity, 'rotation', msg.rotation, ts))       wins |= PROP_ROTATION;
+  if (lwwMerge(entity, 'scale', msg.scale, ts))             wins |= PROP_SCALE;
+  if (lwwMerge(entity, 'planeOffset', msg.planeOffset, ts)) wins |= PROP_PLANE_OFFSET;
 
   const fid = msg.furnitureId?.slice(-6) || '?';
-  const c = msg.committed ? 'C' : 'D'; // Committed / Drag
-  log('⬇ FU', `p${client.playerId} ${fid} ${c} chg=${fmtChanged(changed)} pos=${fmtPos(msg.position)} wins=${fmtChanged(wins)}`);
+  const c = msg.committed ? 'C' : 'D';
+  log('⬇ FU', `p${client.playerId} ${fid} ${c} pos=${fmtPos(msg.position)} wins=${fmtChanged(wins)}`);
 
-  // If nothing won and not committed, skip broadcast
   if (wins === 0 && !msg.committed) {
     log('⬇ FU', `p${client.playerId} ${fid} SKIP (no wins)`);
     return;
@@ -525,9 +522,8 @@ function handleFurnitureUpdate(ws, client, msg) {
 
   if (msg.committed) session.sequenceNumber++;
 
-  // Broadcast merged state (all properties from server-side entity state)
   const merged = {
-    type: 'furniture_update', playerId: client.playerId,
+    type: 'furniture_update',
     furnitureId: msg.furnitureId,
     position: entity.position?.v || msg.position,
     rotation: entity.rotation?.v || msg.rotation,
@@ -672,7 +668,7 @@ function handleFurnitureLock(ws, client, msg) {
   if (existing && existing !== client.playerId) {
     send(ws, {
       type: 'furniture_lock_denied', furnitureId: msg.furnitureId,
-      property: msg.property || 'position', lockedBy: existing
+      property: msg.property || 'position'
     });
     log('Lock', `denied "${msg.furnitureId}.${msg.property}" for player=${client.playerId} (held by ${existing})`);
     return;
