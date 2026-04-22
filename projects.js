@@ -109,7 +109,7 @@ function serializeUsers(usersMap, proj) {
 
 async function handlePostProjects(req, res) {
   const body = await readBody(req);
-  const { projectId, ownerUserId, ownerName, projectXml, projectTitle } = body;
+  const { projectId, ownerUserId, ownerName, ownerAvatarUrl, projectXml, projectTitle } = body;
 
   if (!projectId || !ownerUserId) {
     return jsonErr(res, 400, 'projectId and ownerUserId are required');
@@ -124,12 +124,16 @@ async function handlePostProjects(req, res) {
     // Backward compat: entries created before globalRole was introduced lack the field.
     // JSON.stringify silently omits undefined fields, which breaks client parsing.
     if (p.globalRole === undefined) p.globalRole = 'can_view';
+    // Update owner avatar URL if provided
+    if (ownerAvatarUrl && p.users && p.users.has(ownerUserId)) {
+      p.users.get(ownerUserId).avatarUrl = ownerAvatarUrl;
+    }
     log('Projects', `Re-registered project ${projectId} by owner ${ownerUserId}`);
     saveToFile();
     return jsonOk(res, { ok: true, projectId, shareUrl: `/projects/${projectId}` });
   }
 
-  const owner = { userId: ownerUserId, name: ownerName || 'Unknown', avatarUrl: '', role: 'owner', isGuest: false };
+  const owner = { userId: ownerUserId, name: ownerName || 'Unknown', avatarUrl: ownerAvatarUrl || '', role: 'owner', isGuest: false };
   const users = new Map([[ownerUserId, owner]]);
   projects.set(projectId, {
     projectId,
