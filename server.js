@@ -190,7 +190,7 @@ function send(ws, obj) {
 function sendError(ws, code, message) {
   const client = clients.get(ws);
   log('Error', `player=${client?.playerId} code=${code} msg="${message}"`);
-  send(ws, { type: 'session_error', code, message });
+  send(ws, { type: 'SessionError', code, message });
 }
 
 function findSessionById(id) {
@@ -276,10 +276,10 @@ function getOrCreateLegacySession(ws, client) {
     if (p.playerId !== client.playerId)
       existing.push({ id: p.playerId, userName: p.userName, color: p.color, position: p.position, viewMode: p.viewMode || '3d' });
   }
-  send(ws, { type: 'welcome', playerId: client.playerId, role: player.role, players: existing });
+  send(ws, { type: 'Welcome', playerId: client.playerId, role: player.role, players: existing });
 
   broadcastToSession(session, ws, {
-    type: 'player_joined', playerId: client.playerId,
+    type: 'PlayerJoined', playerId: client.playerId,
     position: player.position, rotation: player.rotation,
     viewMode: player.viewMode || '3d'
   });
@@ -340,7 +340,7 @@ function handleCreateSession(ws, client, msg) {
   client.sessionId = sessionId;
 
   send(ws, {
-    type: 'session_created', inviteCode,
+    type: 'SessionCreated', inviteCode,
     playerId: client.playerId,
     color: player.color
   });
@@ -384,13 +384,13 @@ function handleJoinSession(ws, client, msg) {
   }
 
   send(ws, {
-    type: 'session_state', projectXml: session.projectXml,
+    type: 'SessionState', projectXml: session.projectXml,
     presence, role,
     playerId: client.playerId, inviteCode: session.inviteCode
   });
 
   broadcastToSession(session, ws, {
-    type: 'player_joined', playerId: client.playerId,
+    type: 'PlayerJoined', playerId: client.playerId,
     userId: player.userId, userName: player.userName, role,
     color: player.color, avatarUrl: player.avatarUrl || '',
     position: player.position, rotation: player.rotation,
@@ -451,7 +451,7 @@ function leaveSession(ws, client) {
 
       // Notify all remaining players
       broadcastToSession(session, null, {
-        type: 'owner_changed',
+        type: 'OwnerChanged',
         newOwnerId: nextPlayer.playerId,
         reason: 'owner_left'
       });
@@ -459,7 +459,7 @@ function leaveSession(ws, client) {
       log('Session', `${session.id} ownership transferred to player ${nextPlayer.playerId} (total: ${session.players.size})`);
     }
   } else {
-    broadcastToSession(session, ws, { type: 'player_left', playerId: client.playerId });
+    broadcastToSession(session, ws, { type: 'PlayerLeft', playerId: client.playerId });
     log('Session', `Player ${client.playerId} left ${session.id} (total: ${session.players.size})`);
   }
 
@@ -484,7 +484,7 @@ function handleMove(ws, client, msg) {
   }
 
   broadcastToSession(session, ws, {
-    type: 'player_moved', playerId: client.playerId,
+    type: 'PlayerMoved', playerId: client.playerId,
     position: msg.position, rotation: msg.rotation,
     viewMode: msg.viewMode || '3d'
   });
@@ -520,7 +520,7 @@ function handleDomainTransform(ws, client, msg) {
   if (msg.committed) session.sequenceNumber++;
 
   const merged = {
-    type: 'domain_transform',
+    type: 'DomainTransform',
     id: msg.id,
     position: entity.position?.v || msg.position,
     rotation: entity.rotation?.v || msg.rotation,
@@ -563,7 +563,7 @@ function handleDomainLifecycle(ws, client, msg) {
     }
 
     const n = broadcastToSession(session, ws, {
-      type: 'domain_lifecycle', playerId: client.playerId,
+      type: 'DomainLifecycle', playerId: client.playerId,
       op: 'remove', uniqueId: msg.uniqueId
     });
 
@@ -573,7 +573,7 @@ function handleDomainLifecycle(ws, client, msg) {
 
   // op === 'add' (default)
   const n = broadcastToSession(session, ws, {
-    type: 'domain_lifecycle', playerId: client.playerId,
+    type: 'DomainLifecycle', playerId: client.playerId,
     op: 'add', uniqueId: msg.uniqueId, parentId: msg.parentId,
     kind: msg.kind, xml: msg.xml,
     variationPath: msg.variationPath || ''
@@ -625,7 +625,7 @@ function handleDomainChange(ws, client, msg) {
   session.sequenceNumber++;
 
   const n = broadcastToSession(session, ws, {
-    type: 'domain_change', playerId: client.playerId,
+    type: 'DomainChange', playerId: client.playerId,
     targets: winningTargets
   });
 
@@ -696,7 +696,7 @@ function sendPossiblyChunked(ws, obj) {
   const total = Math.ceil(json.length / MAX_CHUNK_SIZE);
   for (let i = 0; i < total; i++) {
     const chunk = json.slice(i * MAX_CHUNK_SIZE, (i + 1) * MAX_CHUNK_SIZE);
-    ws.send(JSON.stringify({ type: 'chunk', messageId, index: i, total, data: chunk }));
+    ws.send(JSON.stringify({ type: 'Chunk', messageId, index: i, total, data: chunk }));
   }
   log('Chunk', `Sent ${total} chunks (${json.length} chars) id=${messageId}`);
 }
@@ -722,7 +722,7 @@ wss.on('connection', (ws) => {
     }
 
     // Handle chunk assembly
-    if (msg.type === 'chunk') {
+    if (msg.type === 'Chunk') {
       const fullJson = handleChunk(ws, msg);
       if (!fullJson) return; // waiting for more chunks
       try { msg = JSON.parse(fullJson); } catch (e) {
@@ -734,22 +734,22 @@ wss.on('connection', (ws) => {
 
     const client = clients.get(ws);
 
-    if (msg.type !== 'move' && msg.type !== 'ping') {
+    if (msg.type !== 'Move' && msg.type !== 'Ping') {
       const idTail = (msg.id || msg.targetId || '').slice(-6);
       const extra = idTail ? ` id=..${idTail}` : '';
       log('⬇ IN', `p${client.playerId} ${msg.type}${extra}${msg.committed ? ' COMMIT' : ''}`);
     }
 
     switch (msg.type) {
-      case 'create_session': handleCreateSession(ws, client, msg); break;
-      case 'join_session':   handleJoinSession(ws, client, msg); break;
-      case 'leave_session':  leaveSession(ws, client); break;
-      case 'move':           handleMove(ws, client, msg); break;
-      case 'domain_transform': handleDomainTransform(ws, client, msg); break;
-      case 'domain_lifecycle': handleDomainLifecycle(ws, client, msg); break;
-      case 'domain_change':  handleDomainChange(ws, client, msg); break;
-      case 'update_state':   handleUpdateState(ws, client, msg); break;
-      case 'ping': send(ws, { type: 'pong' }); break;
+      case 'CreateSession': handleCreateSession(ws, client, msg); break;
+      case 'JoinSession':   handleJoinSession(ws, client, msg); break;
+      case 'LeaveSession':  leaveSession(ws, client); break;
+      case 'Move':           handleMove(ws, client, msg); break;
+      case 'DomainTransform': handleDomainTransform(ws, client, msg); break;
+      case 'DomainLifecycle': handleDomainLifecycle(ws, client, msg); break;
+      case 'DomainChange':  handleDomainChange(ws, client, msg); break;
+      case 'UpdateState':   handleUpdateState(ws, client, msg); break;
+      case 'Ping': send(ws, { type: 'Pong' }); break;
       default:
         log('Warn', `Player ${client.playerId} sent unknown type: "${msg.type}"`);
         break;
@@ -976,7 +976,7 @@ function connectBot(slot, inviteCode, rooms) {
   botWs.on('open', () => {
     const botClient = clients.get(botWs);
     if (botClient) botClient.isBot = true;
-    botWs.send(JSON.stringify({ type: 'join_session', inviteCode, userName: name, avatarUrl: slot.avatarUrl || '' }));
+    botWs.send(JSON.stringify({ type: 'JoinSession', inviteCode, userName: name, avatarUrl: slot.avatarUrl || '' }));
   });
 
   const chunkBuf = new Map(); // messageId -> { chunks[], total }
@@ -984,7 +984,7 @@ function connectBot(slot, inviteCode, rooms) {
     let msg; try { msg = JSON.parse(raw); } catch { return; }
 
     // Reassemble chunked messages
-    if (msg.type === 'chunk') {
+    if (msg.type === 'Chunk') {
       let entry = chunkBuf.get(msg.messageId);
       if (!entry) { entry = { chunks: [], total: msg.total }; chunkBuf.set(msg.messageId, entry); }
       entry.chunks[msg.index] = msg.data;
@@ -995,7 +995,7 @@ function connectBot(slot, inviteCode, rooms) {
       try { msg = JSON.parse(full); } catch { return; }
     }
 
-    if (msg.type === 'session_state') {
+    if (msg.type === 'SessionState') {
       log('Bots', `${name} connected at (${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})`);
 
       slot.moveTimer = setInterval(() => {
@@ -1045,7 +1045,7 @@ function connectBot(slot, inviteCode, rooms) {
 
         const sendY = viewMode === '2d' ? 0 : y;
         const sendRotY = viewMode === '2d' ? 0 : rotY;
-        botWs.send(JSON.stringify({ type: 'move', position: { x, y: sendY, z }, rotation: { x: 0, y: sendRotY, z: 0 }, viewMode }));
+        botWs.send(JSON.stringify({ type: 'Move', position: { x, y: sendY, z }, rotation: { x: 0, y: sendRotY, z: 0 }, viewMode }));
       }, BOT_MOVE_INTERVAL);
 
       // Schedule random disconnect
@@ -1060,7 +1060,7 @@ function connectBot(slot, inviteCode, rooms) {
         }
       }, onlineTime);
     }
-    if (msg.type === 'session_error') log('Bots', `${name} error: ${msg.code}`);
+    if (msg.type === 'SessionError') log('Bots', `${name} error: ${msg.code}`);
   });
 
   botWs.on('close', () => {
