@@ -274,7 +274,7 @@ function getOrCreateLegacySession(ws, client) {
   const existing = [];
   for (const [, p] of session.players) {
     if (p.playerId !== client.playerId)
-      existing.push({ id: p.playerId, userName: p.userName, color: p.color, position: p.position, rotation: p.rotation, viewMode: p.viewMode || '3d' });
+      existing.push({ id: p.playerId, userName: p.userName, color: p.color, position: p.position, viewMode: p.viewMode || '3d' });
   }
   send(ws, { type: 'welcome', playerId: client.playerId, role: player.role, players: existing });
 
@@ -340,8 +340,8 @@ function handleCreateSession(ws, client, msg) {
   client.sessionId = sessionId;
 
   send(ws, {
-    type: 'session_created', inviteCode, sessionId,
-    sequenceNumber: 0, playerId: client.playerId,
+    type: 'session_created', inviteCode,
+    playerId: client.playerId,
     color: player.color
   });
 
@@ -385,7 +385,7 @@ function handleJoinSession(ws, client, msg) {
 
   send(ws, {
     type: 'session_state', projectXml: session.projectXml,
-    sequenceNumber: session.sequenceNumber, presence, role,
+    presence, role,
     playerId: client.playerId, inviteCode: session.inviteCode
   });
 
@@ -429,9 +429,6 @@ function leaveSession(ws, client) {
   const session = findSessionById(client.sessionId);
   client.sessionId = null;
   if (!session) return;
-
-  // Release all locks held by this player
-  releasePlayerLocks(session, client.playerId, ws);
 
   session.players.delete(client.playerId);
 
@@ -493,42 +490,38 @@ function handleMove(ws, client, msg) {
   });
 }
 
-function handleFurnitureUpdate(ws, client, msg) {
+function handleDomainTransform(ws, client, msg) {
   const session = getSession(ws, client, true);
   if (!session) return;
   const role = session.players.get(client.playerId)?.role;
   if (!canEdit(role)) {
-    log('Denied', `player=${client.playerId} furniture_update (role: ${role})`);
+    log('Denied', `player=${client.playerId} domain_transform (role: ${role})`);
     return;
   }
 
   const ts = Date.now();
-  const changed = msg.changed || PROP_ALL;
-  const entity = getEntityState(session, msg.furnitureId);
+  const entity = getEntityState(session, msg.id);
 
-  // Per-property LWW merge
   let wins = 0;
-  if (changed & PROP_POSITION)     { if (lwwMerge(entity, 'position', msg.position, ts)) wins |= PROP_POSITION; }
-  if (changed & PROP_ROTATION)     { if (lwwMerge(entity, 'rotation', msg.rotation, ts)) wins |= PROP_ROTATION; }
-  if (changed & PROP_SCALE)        { if (lwwMerge(entity, 'scale', msg.scale, ts)) wins |= PROP_SCALE; }
-  if (changed & PROP_PLANE_OFFSET) { if (lwwMerge(entity, 'planeOffset', msg.planeOffset, ts)) wins |= PROP_PLANE_OFFSET; }
+  if (lwwMerge(entity, 'position', msg.position, ts))       wins |= PROP_POSITION;
+  if (lwwMerge(entity, 'rotation', msg.rotation, ts))       wins |= PROP_ROTATION;
+  if (lwwMerge(entity, 'scale', msg.scale, ts))             wins |= PROP_SCALE;
+  if (lwwMerge(entity, 'planeOffset', msg.planeOffset, ts)) wins |= PROP_PLANE_OFFSET;
 
-  const fid = msg.furnitureId?.slice(-6) || '?';
-  const c = msg.committed ? 'C' : 'D'; // Committed / Drag
-  log('⬇ FU', `p${client.playerId} ${fid} ${c} chg=${fmtChanged(changed)} pos=${fmtPos(msg.position)} wins=${fmtChanged(wins)}`);
+  const idTail = msg.id?.slice(-6) || '?';
+  const c = msg.committed ? 'C' : 'D';
+  log('⬇ DT', `p${client.playerId} ${idTail} ${c} pos=${fmtPos(msg.position)} wins=${fmtChanged(wins)}`);
 
-  // If nothing won and not committed, skip broadcast
   if (wins === 0 && !msg.committed) {
-    log('⬇ FU', `p${client.playerId} ${fid} SKIP (no wins)`);
+    log('⬇ DT', `p${client.playerId} ${idTail} SKIP (no wins)`);
     return;
   }
 
   if (msg.committed) session.sequenceNumber++;
 
-  // Broadcast merged state (all properties from server-side entity state)
   const merged = {
-    type: 'furniture_update', playerId: client.playerId,
-    furnitureId: msg.furnitureId,
+    type: 'domain_transform',
+    id: msg.id,
     position: entity.position?.v || msg.position,
     rotation: entity.rotation?.v || msg.rotation,
     scale: entity.scale?.v || msg.scale,
@@ -537,7 +530,7 @@ function handleFurnitureUpdate(ws, client, msg) {
   };
   const n = broadcastToSession(session, ws, merged);
 
-  log('⬆ FU', `p${client.playerId} ${fid} ${c} → ${n} peers pos=${fmtPos(merged.position)}`);
+  log('⬆ DT', `p${client.playerId} ${idTail} ${c} → ${n} peers pos=${fmtPos(merged.position)}`);
 }
 
 // --- Domain lifecycle (add + remove) ---
@@ -598,21 +591,34 @@ function handleDomainChange(ws, client, msg) {
     return;
   }
 
-  if (!msg.changes || !msg.changes.length) return;
+  if (!msg.targets || !msg.targets.length) return;
 
   const ts = Date.now();
-  const winningChanges = [];
+  const winningTargets = [];
 
-  for (const change of msg.changes) {
-    const entityId = `dom:${msg.targetId}:${change.name}`;
-    const entity = getEntityState(session, entityId);
-    if (lwwMerge(entity, 'value', change.value, ts)) {
-      winningChanges.push(change);
+  for (const target of msg.targets) {
+    if (!target.changes || !target.changes.length) continue;
+
+    const winningChanges = [];
+    for (const change of target.changes) {
+      const entityId = `dom:${target.targetId}:${change.name}`;
+      const entity = getEntityState(session, entityId);
+      if (lwwMerge(entity, 'value', change.value, ts)) {
+        winningChanges.push(change);
+      }
+    }
+
+    if (winningChanges.length > 0) {
+      winningTargets.push({
+        targetId: target.targetId,
+        targetDebug: target.targetDebug || '',
+        changes: winningChanges
+      });
     }
   }
 
-  if (winningChanges.length === 0) {
-    log('Domain', `all changes rejected (stale) target="${msg.targetId}" by player=${client.playerId}`);
+  if (winningTargets.length === 0) {
+    log('Domain', `all changes rejected (stale) by player=${client.playerId}`);
     return;
   }
 
@@ -620,90 +626,15 @@ function handleDomainChange(ws, client, msg) {
 
   const n = broadcastToSession(session, ws, {
     type: 'domain_change', playerId: client.playerId,
-    targetId: msg.targetId,
-    targetDebug: msg.targetDebug || '',
-    changes: winningChanges
+    targets: winningTargets
   });
 
-  const names = winningChanges.map(c => c.name).join(',');
-  const debug = msg.targetDebug ? ` [${msg.targetDebug}]` : '';
-  log('Domain', `change target="${msg.targetId}"${debug} props=[${names}] by player=${client.playerId} → ${n} peers`);
-}
-
-// --- Furniture locking ---
-
-// Lock key format: "furnitureId:property" (per-property locking)
-function lockKey(furnitureId, property) {
-  return `${furnitureId}:${property || 'position'}`;
-}
-
-function parseLockKey(key) {
-  const i = key.indexOf(':');
-  return { furnitureId: key.slice(0, i), property: key.slice(i + 1) };
-}
-
-function handleFurnitureLock(ws, client, msg) {
-  const session = getSession(ws, client, false);
-  if (!session) return;
-  const role = session.players.get(client.playerId)?.role;
-  if (!canEdit(role)) {
-    log('Denied', `player=${client.playerId} furniture_lock (role: ${role})`);
-    return;
-  }
-
-  if (!session.locks) session.locks = new Map();
-
-  const key = lockKey(msg.furnitureId, msg.property);
-  const existing = session.locks.get(key);
-  if (existing && existing !== client.playerId) {
-    send(ws, {
-      type: 'furniture_lock_denied', furnitureId: msg.furnitureId,
-      property: msg.property || 'position', lockedBy: existing
-    });
-    log('Lock', `denied "${msg.furnitureId}.${msg.property}" for player=${client.playerId} (held by ${existing})`);
-    return;
-  }
-
-  session.locks.set(key, client.playerId);
-
-  broadcastToSession(session, ws, {
-    type: 'furniture_locked', furnitureId: msg.furnitureId,
-    property: msg.property || 'position', playerId: client.playerId
-  });
-
-  log('Lock', `granted "${msg.furnitureId}.${msg.property}" to player=${client.playerId}`);
-}
-
-function handleFurnitureUnlock(ws, client, msg) {
-  const session = getSession(ws, client, false);
-  if (!session) return;
-
-  if (!session.locks) return;
-  const key = lockKey(msg.furnitureId, msg.property);
-  if (session.locks.get(key) !== client.playerId) return;
-
-  session.locks.delete(key);
-  broadcastToSession(session, ws, {
-    type: 'furniture_unlocked', furnitureId: msg.furnitureId,
-    property: msg.property || 'position'
-  });
-  log('Lock', `released "${msg.furnitureId}.${msg.property}" by player=${client.playerId}`);
-}
-
-function releasePlayerLocks(session, playerId, excludeWs) {
-  if (!session.locks) return;
-  const toRelease = [];
-  for (const [key, pid] of session.locks) {
-    if (pid === playerId) toRelease.push(key);
-  }
-  for (const key of toRelease) {
-    session.locks.delete(key);
-    const { furnitureId, property } = parseLockKey(key);
-    broadcastToSession(session, excludeWs, {
-      type: 'furniture_unlocked', furnitureId, property
-    });
-    log('Lock', `released "${furnitureId}.${property}" (was player=${playerId})`);
-  }
+  const summary = winningTargets.map(t => {
+    const names = t.changes.map(c => c.name).join(',');
+    const label = t.targetDebug || t.targetId;
+    return `${label}[${names}]`;
+  }).join(', ');
+  log('Domain', `change batch: ${winningTargets.length} targets by player=${client.playerId} → ${n} peers (${summary})`);
 }
 
 function handleUpdateState(ws, client, msg) {
@@ -804,8 +735,8 @@ wss.on('connection', (ws) => {
     const client = clients.get(ws);
 
     if (msg.type !== 'move' && msg.type !== 'ping') {
-      const fid = (msg.furnitureId || msg.targetId || '').slice(-6);
-      const extra = fid ? ` id=..${fid}` : '';
+      const idTail = (msg.id || msg.targetId || '').slice(-6);
+      const extra = idTail ? ` id=..${idTail}` : '';
       log('⬇ IN', `p${client.playerId} ${msg.type}${extra}${msg.committed ? ' COMMIT' : ''}`);
     }
 
@@ -814,11 +745,9 @@ wss.on('connection', (ws) => {
       case 'join_session':   handleJoinSession(ws, client, msg); break;
       case 'leave_session':  leaveSession(ws, client); break;
       case 'move':           handleMove(ws, client, msg); break;
-      case 'furniture_update': handleFurnitureUpdate(ws, client, msg); break;
+      case 'domain_transform': handleDomainTransform(ws, client, msg); break;
       case 'domain_lifecycle': handleDomainLifecycle(ws, client, msg); break;
       case 'domain_change':  handleDomainChange(ws, client, msg); break;
-      case 'furniture_lock': handleFurnitureLock(ws, client, msg); break;
-      case 'furniture_unlock': handleFurnitureUnlock(ws, client, msg); break;
       case 'update_state':   handleUpdateState(ws, client, msg); break;
       case 'ping': send(ws, { type: 'pong' }); break;
       default:
