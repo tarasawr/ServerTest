@@ -237,10 +237,16 @@ function flushPendingJoiner(session, entry) {
     });
   }
 
+  ensureSelectionMaps(session);
+  const selections = [];
+  for (const [targetId, playerId] of session.selections)
+    selections.push({ playerId, targetId });
+
   send(ws, {
     type: 'SessionState', projectXml: session.projectXml,
     presence, role,
-    playerId: client.playerId, inviteCode: session.inviteCode
+    playerId: client.playerId, inviteCode: session.inviteCode,
+    selections
   });
 
   ws._sessionStateSent = true;
@@ -297,7 +303,9 @@ function getOrCreateLegacySession(ws, client) {
       linkPermission: 'edit',
       sequenceNumber: 0,
       players: new Map(),
-      entityState: new Map()
+      entityState: new Map(),
+      selections: new Map(),
+      playerSelections: new Map()
     };
     sessions.set(LEGACY_INVITE, session);
     log('Legacy', 'Session created');
@@ -365,7 +373,9 @@ function handleCreateSession(ws, client, msg) {
     linkPermission, sequenceNumber: 0,
     projectId: null,
     players: new Map(),
-    entityState: new Map()
+    entityState: new Map(),
+    selections: new Map(),       // targetId -> playerId
+    playerSelections: new Map()  // playerId -> targetId
   };
 
   const player = {
@@ -505,6 +515,13 @@ function leaveSession(ws, client) {
   const session = findSessionById(client.sessionId);
   client.sessionId = null;
   if (!session) return;
+
+  // Release any selection held by the leaving player (clients clear highlight)
+  const releasedTarget = releasePlayerSelection(session, client.playerId);
+  if (releasedTarget) {
+    broadcastSelection(session, ws, client.playerId, '');
+    log('Select', `auto-release "${releasedTarget.slice(-6)}" (p${client.playerId} leaving)`);
+  }
 
   session.players.delete(client.playerId);
 
@@ -655,6 +672,16 @@ function handleDomainLifecycle(ws, client, msg) {
       }
     }
 
+    // Drop selection lock if the removed entity was selected
+    ensureSelectionMaps(session);
+    if (session.selections.has(msg.uniqueId)) {
+      const lockOwner = session.selections.get(msg.uniqueId);
+      session.selections.delete(msg.uniqueId);
+      session.playerSelections.delete(lockOwner);
+      broadcastSelection(session, null, lockOwner, '');
+      log('Select', `auto-release "${(msg.uniqueId || '').slice(-6)}" (entity removed)`);
+    }
+
     const n = broadcastToSession(session, ws, {
       type: 'DomainLifecycle', playerId: client.playerId,
       op: 'remove', uniqueId: msg.uniqueId
@@ -728,6 +755,79 @@ function handleDomainChange(ws, client, msg) {
     return `${label}[${names}]`;
   }).join(', ');
   log('Domain', `change batch: ${winningTargets.length} targets by player=${client.playerId} → ${n} peers (${summary})`);
+}
+
+// --- Domain selection (per-player object lock) ---
+// Семантика: один игрок держит максимум один targetId. First-wins: если объект
+// уже занят другим игроком, попытка отвергается молча (клиент сам почистит локальный
+// selection через guard). Снятие выделения = пустой targetId.
+
+function ensureSelectionMaps(session) {
+  if (!session.selections) session.selections = new Map();
+  if (!session.playerSelections) session.playerSelections = new Map();
+}
+
+function releasePlayerSelection(session, playerId) {
+  ensureSelectionMaps(session);
+  const prev = session.playerSelections.get(playerId);
+  if (!prev) return null;
+  session.playerSelections.delete(playerId);
+  if (session.selections.get(prev) === playerId)
+    session.selections.delete(prev);
+  return prev;
+}
+
+function broadcastSelection(session, excludeWs, playerId, targetId) {
+  return broadcastToSession(session, excludeWs, {
+    type: 'DomainSelection',
+    playerId,
+    targetId: targetId || ''
+  });
+}
+
+function handleDomainSelection(ws, client, msg) {
+  const session = getSession(ws, client, true);
+  if (!session) return;
+  const role = session.players.get(client.playerId)?.role;
+  if (!canEdit(role)) {
+    log('Denied', `player=${client.playerId} domain_selection (role: ${role})`);
+    return;
+  }
+  ensureSelectionMaps(session);
+
+  const targetId = (msg.targetId || '').trim();
+  const idTail = targetId ? targetId.slice(-6) : '∅';
+
+  // Deselect (empty targetId)
+  if (!targetId) {
+    const released = releasePlayerSelection(session, client.playerId);
+    if (released) {
+      const n = broadcastSelection(session, ws, client.playerId, '');
+      log('Select', `release "${released.slice(-6)}" by p${client.playerId} → ${n} peers`);
+    }
+    return;
+  }
+
+  // First-wins: target already owned by someone else → reject silently
+  const owner = session.selections.get(targetId);
+  if (owner !== undefined && owner !== client.playerId) {
+    log('Denied', `player=${client.playerId} select "${idTail}" (locked by p${owner})`);
+    return;
+  }
+
+  // Same target already held by this player → no-op
+  if (owner === client.playerId) return;
+
+  // Release any previous selection of this player, then claim the new target
+  const released = releasePlayerSelection(session, client.playerId);
+  if (released)
+    broadcastSelection(session, ws, client.playerId, '');
+
+  session.selections.set(targetId, client.playerId);
+  session.playerSelections.set(client.playerId, targetId);
+
+  const n = broadcastSelection(session, ws, client.playerId, targetId);
+  log('Select', `claim "${idTail}" by p${client.playerId} → ${n} peers`);
 }
 
 function handleUpdateState(ws, client, msg) {
@@ -841,6 +941,7 @@ wss.on('connection', (ws) => {
       case 'DomainTransform': handleDomainTransform(ws, client, msg); break;
       case 'DomainLifecycle': handleDomainLifecycle(ws, client, msg); break;
       case 'DomainChange':  handleDomainChange(ws, client, msg); break;
+      case 'DomainSelection': handleDomainSelection(ws, client, msg); break;
       case 'UpdateState':   handleUpdateState(ws, client, msg); break;
       case 'SnapshotResponse': handleSnapshotResponse(ws, client, msg); break;
       case 'Ping': send(ws, { type: 'Pong' }); break;
