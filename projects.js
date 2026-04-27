@@ -468,6 +468,26 @@ function handleGetProjectSession(res, projectId, sessions) {
   jsonErr(res, 404, 'No active session for this project');
 }
 
+// Returns players currently online inside the multiplayer session linked to this project.
+// Distinct from /users (= everyone with access). Empty list if no active session is linked.
+function handleGetProjectActiveUsers(res, projectId, sessions) {
+  if (!projects.has(projectId)) {
+    return jsonErr(res, 404, `Project ${projectId} not found`);
+  }
+  const list = [];
+  for (const [, s] of sessions) {
+    if (s.projectId !== projectId) continue;
+    for (const [, p] of s.players) {
+      list.push({
+        userId: p.userId || '',
+        name: p.userName || '',
+        avatarUrl: p.avatarUrl || ''
+      });
+    }
+  }
+  jsonOk(res, { users: list });
+}
+
 async function handleLinkSession(req, res, inviteCode, sessions) {
   const body = await readBody(req);
   const { projectId } = body;
@@ -575,6 +595,13 @@ function handleRequest(req, res, url, sessions) {
   const projSessionM = p.match(/^\/projects\/([^\/]+)\/session$/);
   if (projSessionM && req.method === 'GET') {
     handleGetProjectSession(res, projSessionM[1], sessions);
+    return true;
+  }
+
+  // GET /projects/:id/active-users — players currently in the session linked to this project
+  const projActiveUsersM = p.match(/^\/projects\/([^\/]+)\/active-users$/);
+  if (projActiveUsersM && req.method === 'GET') {
+    handleGetProjectActiveUsers(res, projActiveUsersM[1], sessions);
     return true;
   }
 
