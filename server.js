@@ -305,7 +305,8 @@ function getOrCreateLegacySession(ws, client) {
       players: new Map(),
       entityState: new Map(),
       selections: new Map(),
-      playerSelections: new Map()
+      playerSelections: new Map(),
+      lastActivityByPlayer: new Map()
     };
     sessions.set(LEGACY_INVITE, session);
     log('Legacy', 'Session created');
@@ -374,8 +375,9 @@ function handleCreateSession(ws, client, msg) {
     projectId: null,
     players: new Map(),
     entityState: new Map(),
-    selections: new Map(),       // targetId -> playerId
-    playerSelections: new Map()  // playerId -> targetId
+    selections: new Map(),         // targetId -> playerId
+    playerSelections: new Map(),   // playerId -> targetId
+    lastActivityByPlayer: new Map()// playerId -> Date.now()
   };
 
   const player = {
@@ -522,6 +524,7 @@ function leaveSession(ws, client) {
     broadcastSelection(session, ws, client.playerId, '');
     log('Select', `auto-release "${releasedTarget.slice(-6)}" (p${client.playerId} leaving)`);
   }
+  session.lastActivityByPlayer?.delete(client.playerId);
 
   session.players.delete(client.playerId);
 
@@ -765,7 +768,38 @@ function handleDomainChange(ws, client, msg) {
 function ensureSelectionMaps(session) {
   if (!session.selections) session.selections = new Map();
   if (!session.playerSelections) session.playerSelections = new Map();
+  if (!session.lastActivityByPlayer) session.lastActivityByPlayer = new Map();
 }
+
+function touchPlayerActivity(session, playerId) {
+  ensureSelectionMaps(session);
+  session.lastActivityByPlayer.set(playerId, Date.now());
+}
+
+// Auto-release locks held by silent players (heartbeat/network gone, app suspended).
+const LOCK_TTL_MS = 60_000;
+const LOCK_SWEEP_INTERVAL_MS = 15_000;
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [, session] of sessions) {
+    if (!session.selections || session.selections.size === 0) continue;
+    if (!session.lastActivityByPlayer) continue;
+
+    const stale = [];
+    for (const [targetId, playerId] of session.selections) {
+      const last = session.lastActivityByPlayer.get(playerId) || 0;
+      if (now - last > LOCK_TTL_MS) stale.push({ targetId, playerId, idle: now - last });
+    }
+    for (const entry of stale) {
+      session.selections.delete(entry.targetId);
+      if (session.playerSelections.get(entry.playerId) === entry.targetId)
+        session.playerSelections.delete(entry.playerId);
+      broadcastSelection(session, null, entry.playerId, '');
+      log('Select', `auto-release "${entry.targetId.slice(-6)}" by p${entry.playerId} (idle ${entry.idle}ms)`);
+    }
+  }
+}, LOCK_SWEEP_INTERVAL_MS);
 
 function releasePlayerSelection(session, playerId) {
   ensureSelectionMaps(session);
@@ -931,6 +965,11 @@ wss.on('connection', (ws) => {
       const idTail = (msg.id || msg.targetId || '').slice(-6);
       const extra = idTail ? ` id=..${idTail}` : '';
       log('⬇ IN', `p${client.playerId} ${msg.type}${extra}${msg.committed ? ' COMMIT' : ''}`);
+    }
+
+    if (client?.sessionId) {
+      const session = findSessionById(client.sessionId);
+      if (session) touchPlayerActivity(session, client.playerId);
     }
 
     switch (msg.type) {
