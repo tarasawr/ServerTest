@@ -7,6 +7,7 @@ const LEGACY_INVITE = '__legacy__';
 let BOT_COUNT = 0; // bots auto-spawned per session (0 to disable)
 let BOT_VIEW_MODE = 'random'; // 'random', '2d', '3d' — forced view mode for bots
 let BOT_REJOIN = true; // whether bots disconnect after session time and reconnect
+let BOT_MOBILE_MODE = 'all'; // 'all' (every bot is mobile) or 'random' (50/50 mobile/desktop). Mirror bots are always mobile.
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -46,6 +47,7 @@ const server = http.createServer((req, res) => {
   // GET /bots?count=2 — spawn bots in all active sessions
   // GET /bots?count=0 — disable bots (new sessions won't get bots)
   // GET /bots?mode=2d|3d|random — force bot view mode
+  // GET /bots?mobile=all|random — toggle bot mobile flag (all=every bot mobile, random=50/50). Mirror bots always mobile.
   // GET /bots?rejoin=0|1 — toggle disconnect/reconnect cycle (0 keeps bots online forever)
   // GET /bots?sessionMin=N&sessionMax=N — bot session duration in seconds (online time)
   // GET /bots?offlineMin=N&offlineMax=N — bot offline duration in seconds (before reconnect)
@@ -53,6 +55,7 @@ const server = http.createServer((req, res) => {
   if (url.pathname === '/bots') {
     const count = url.searchParams.get('count');
     const mode = url.searchParams.get('mode');
+    const mobile = url.searchParams.get('mobile');
     const rejoin = url.searchParams.get('rejoin');
     const sessionMin = url.searchParams.get('sessionMin');
     const sessionMax = url.searchParams.get('sessionMax');
@@ -72,6 +75,10 @@ const server = http.createServer((req, res) => {
     if (mode !== null && ['2d', '3d', 'random'].includes(mode)) {
       BOT_VIEW_MODE = mode;
       log('Bots', `Bot view mode set to ${BOT_VIEW_MODE}`);
+    }
+    if (mobile !== null && ['all', 'random'].includes(mobile)) {
+      BOT_MOBILE_MODE = mobile;
+      log('Bots', `Bot mobile mode set to ${BOT_MOBILE_MODE}`);
     }
     if (rejoin !== null) {
       BOT_REJOIN = !(rejoin === '0' || rejoin === 'false');
@@ -104,6 +111,7 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify({
       botCount: BOT_COUNT,
       viewMode: BOT_VIEW_MODE,
+      mobileMode: BOT_MOBILE_MODE,
       rejoin: BOT_REJOIN,
       sessionMin: BOT_MIN_ONLINE_SEC,
       sessionMax: BOT_MAX_ONLINE_SEC,
@@ -1101,6 +1109,8 @@ const BOT_LOOK_SPEED = 2;              // halved — same degrees/sec
 const BOT_ROOM_CHANGE = 0.0025;        // halved
 const BOT_WALL_MARGIN = 0.4;
 const BOT_VIEW_SWITCH_CHANCE = 0.005;  // chance per tick to toggle 2D/3D (~once per 20s)
+const BOT_TAP_MIN_MS = 1500;            // mobile-bot tap interval lower bound (2D only)
+const BOT_TAP_MAX_MS = 4000;            // mobile-bot tap interval upper bound (2D only)
 
 function parseRoomsFromXml(xml) {
   const rooms = [];
@@ -1258,17 +1268,21 @@ function connectBot(slot, inviteCode, rooms) {
   let rotY = Math.random() * 360;
   let paused = false, pauseTicks = 0, lookDir = 1;
   const isMirrorBot = slot.index < BOT_MIRROR_COUNT;
+  const isMobileBot = isMirrorBot || BOT_MOBILE_MODE === 'all' || (BOT_MOBILE_MODE === 'random' && Math.random() < 0.5);
   let viewMode = isMirrorBot
     ? '2d'
     : (BOT_VIEW_MODE === 'random'
         ? (slot.index % 2 === 0 ? '2d' : '3d')
         : BOT_VIEW_MODE);
 
+  let tapX = x, tapZ = z;
+  let nextTapAt = 0;
+
   botWs.on('open', () => {
     botWs.send(JSON.stringify({
       type: 'JoinSession', inviteCode, userName: name,
       avatarUrl: slot.avatarUrl || '',
-      isMobile: true, isBot: true, isMirror: isMirrorBot
+      isMobile: isMobileBot, isBot: true, isMirror: isMirrorBot
     }));
   });
 
@@ -1337,9 +1351,24 @@ function connectBot(slot, inviteCode, rooms) {
           viewMode = BOT_VIEW_MODE;
         }
 
+        if (viewMode === '2d' && isMobileBot) {
+          const now = Date.now();
+          if (now < nextTapAt) return;
+          nextTapAt = now + BOT_TAP_MIN_MS + Math.random() * (BOT_TAP_MAX_MS - BOT_TAP_MIN_MS);
+          if (currentRoom) {
+            const tap = randInPoly(currentRoom);
+            tapX = tap.x; tapZ = tap.z;
+          } else {
+            tapX = x; tapZ = z;
+          }
+        }
+
+        const useTap = viewMode === '2d' && isMobileBot;
+        const sendX = useTap ? tapX : x;
+        const sendZ = useTap ? tapZ : z;
         const sendY = viewMode === '2d' ? 0 : y;
         const sendRotY = viewMode === '2d' ? 0 : rotY;
-        botWs.send(JSON.stringify({ type: 'Move', position: { x, y: sendY, z }, rotation: { x: 0, y: sendRotY, z: 0 }, viewMode }));
+        botWs.send(JSON.stringify({ type: 'Move', position: { x: sendX, y: sendY, z: sendZ }, rotation: { x: 0, y: sendRotY, z: 0 }, viewMode }));
       }, BOT_MOVE_INTERVAL);
 
       if (BOT_REJOIN) {
