@@ -399,6 +399,8 @@ function handleJoinSession(ws, client, msg) {
   if (session.linkPermission === 'none') { sendError(ws, 'NO_ACCESS', 'Link disabled'); return; }
   if (session.players.size >= 25) { sendError(ws, 'SESSION_FULL', 'Max 25 players'); return; }
 
+  if (msg.isBot) client.isBot = true;
+
   let role = session.linkPermission === 'edit' ? 'editor' : 'viewer';
   if (msg.userId && msg.userId === session.ownerUserId) role = 'owner';
 
@@ -1200,9 +1202,7 @@ function connectBot(slot, inviteCode, rooms) {
     : BOT_VIEW_MODE;
 
   botWs.on('open', () => {
-    const botClient = clients.get(botWs);
-    if (botClient) botClient.isBot = true;
-    botWs.send(JSON.stringify({ type: 'JoinSession', inviteCode, userName: name, avatarUrl: slot.avatarUrl || '', isMobile: true }));
+    botWs.send(JSON.stringify({ type: 'JoinSession', inviteCode, userName: name, avatarUrl: slot.avatarUrl || '', isMobile: true, isBot: true }));
   });
 
   const chunkBuf = new Map(); // messageId -> { chunks[], total }
