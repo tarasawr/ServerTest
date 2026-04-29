@@ -445,6 +445,7 @@ function handleJoinSession(ws, client, msg) {
   if (session.players.size >= 25) { sendError(ws, 'SESSION_FULL', 'Max 25 players'); return; }
 
   if (msg.isBot) client.isBot = true;
+  if (msg.isMirror) client.isMirror = true;
 
   let role = session.linkPermission === 'edit' ? 'editor' : 'viewer';
   if (msg.userId && msg.userId === session.ownerUserId) role = 'owner';
@@ -797,19 +798,23 @@ function broadcastSelection(session, excludeWs, playerId, targetId) {
   });
 }
 
-const BOT_MIRROR_COUNT = 3;
+const BOT_MIRROR_COUNT = 2;
 const BOT_RELEASE_MIN_MS = 2000;
 const BOT_RELEASE_MAX_MS = 10000;
 
 function getBotMirrors(session) {
-  const ids = [];
+  const mirrorBots = [];
+  const otherBots = [];
   for (const [pid, p] of session.players) {
     const c = clients.get(p.ws);
-    if (c && c.isBot && (p.role === 'editor' || p.role === 'owner'))
-      ids.push(pid);
+    if (!c || !c.isBot) continue;
+    if (p.role !== 'editor' && p.role !== 'owner') continue;
+    if (c.isMirror) mirrorBots.push(pid);
+    else otherBots.push(pid);
   }
-  ids.sort((a, b) => a - b);
-  return ids.slice(0, Math.min(BOT_MIRROR_COUNT, ids.length));
+  mirrorBots.sort((a, b) => a - b);
+  otherBots.sort((a, b) => a - b);
+  return [...mirrorBots, ...otherBots].slice(0, BOT_MIRROR_COUNT);
 }
 
 function clearBotReleaseTimer(session, playerId) {
@@ -1252,12 +1257,19 @@ function connectBot(slot, inviteCode, rooms) {
   let len = Math.sqrt(dirX * dirX + dirZ * dirZ) || 1; dirX /= len; dirZ /= len;
   let rotY = Math.random() * 360;
   let paused = false, pauseTicks = 0, lookDir = 1;
-  let viewMode = BOT_VIEW_MODE === 'random'
-    ? (slot.index % 2 === 0 ? '2d' : '3d')
-    : BOT_VIEW_MODE;
+  const isMirrorBot = slot.index < BOT_MIRROR_COUNT;
+  let viewMode = isMirrorBot
+    ? '2d'
+    : (BOT_VIEW_MODE === 'random'
+        ? (slot.index % 2 === 0 ? '2d' : '3d')
+        : BOT_VIEW_MODE);
 
   botWs.on('open', () => {
-    botWs.send(JSON.stringify({ type: 'JoinSession', inviteCode, userName: name, avatarUrl: slot.avatarUrl || '', isMobile: true, isBot: true }));
+    botWs.send(JSON.stringify({
+      type: 'JoinSession', inviteCode, userName: name,
+      avatarUrl: slot.avatarUrl || '',
+      isMobile: true, isBot: true, isMirror: isMirrorBot
+    }));
   });
 
   const chunkBuf = new Map(); // messageId -> { chunks[], total }
@@ -1316,12 +1328,13 @@ function connectBot(slot, inviteCode, rooms) {
           rotY = Math.atan2(dirX, dirZ) * 180 / Math.PI;
         }
 
-        // Randomly toggle 2D/3D (only in random mode)
-        if (BOT_VIEW_MODE === 'random' && Math.random() < BOT_VIEW_SWITCH_CHANCE) {
+        if (isMirrorBot) {
+          viewMode = '2d';
+        } else if (BOT_VIEW_MODE === 'random' && Math.random() < BOT_VIEW_SWITCH_CHANCE) {
           viewMode = viewMode === '3d' ? '2d' : '3d';
           log('Bots', `${name} switched to ${viewMode}`);
         } else if (BOT_VIEW_MODE !== 'random') {
-          viewMode = BOT_VIEW_MODE; // respect forced mode (can change live via /bots?mode=)
+          viewMode = BOT_VIEW_MODE;
         }
 
         const sendY = viewMode === '2d' ? 0 : y;
