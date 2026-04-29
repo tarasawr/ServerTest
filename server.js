@@ -221,7 +221,8 @@ function sendSessionStateTo(session, ws, role) {
       playerId: p.playerId, userId: p.userId, userName: p.userName,
       role: p.role, color: p.color, avatarUrl: p.avatarUrl || '',
       position: p.position, rotation: p.rotation,
-      viewMode: p.viewMode || '3d'
+      viewMode: p.viewMode || '3d',
+      isMobile: !!p.isMobile
     });
   }
 
@@ -297,23 +298,27 @@ function getOrCreateLegacySession(ws, client) {
     playerId: client.playerId, userId: null,
     userName: `Player ${client.playerId}`, role: 'owner',
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
-    viewMode: '3d', ws
+    viewMode: '3d', isMobile: false, ws
   };
   session.players.set(client.playerId, player);
   client.sessionId = session.id;
 
-  // Send welcome (old-style message for current client code)
   const existing = [];
   for (const [, p] of session.players) {
     if (p.playerId !== client.playerId)
-      existing.push({ id: p.playerId, userName: p.userName, color: p.color, position: p.position, viewMode: p.viewMode || '3d' });
+      existing.push({
+        id: p.playerId, userName: p.userName, color: p.color,
+        position: p.position, viewMode: p.viewMode || '3d',
+        isMobile: !!p.isMobile
+      });
   }
   send(ws, { type: 'Welcome', playerId: client.playerId, role: player.role, players: existing });
 
   broadcastToSession(session, ws, {
     type: 'PlayerJoined', playerId: client.playerId,
     position: player.position, rotation: player.rotation,
-    viewMode: player.viewMode || '3d'
+    viewMode: player.viewMode || '3d',
+    isMobile: !!player.isMobile
   });
 
   log('Legacy', `Player ${client.playerId} auto-joined (total: ${session.players.size})`);
@@ -366,7 +371,7 @@ function handleCreateSession(ws, client, msg) {
     userName: msg.userName || `Player ${client.playerId}`, role: 'owner',
     color: pickColor(session), avatarUrl: msg.avatarUrl || '',
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
-    viewMode: '3d', ws
+    viewMode: '3d', isMobile: !!msg.isMobile, ws
   };
 
   session.players.set(client.playerId, player);
@@ -402,19 +407,19 @@ function handleJoinSession(ws, client, msg) {
     userName: msg.userName || `Player ${client.playerId}`, role,
     color: pickColor(session), avatarUrl: msg.avatarUrl || '',
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
-    viewMode: '3d', ws
+    viewMode: '3d', isMobile: !!msg.isMobile, ws
   };
 
   session.players.set(client.playerId, player);
   client.sessionId = session.id;
 
-  // Broadcast PlayerJoined to existing players (but not back to the joiner)
   broadcastToSession(session, ws, {
     type: 'PlayerJoined', playerId: client.playerId,
     userId: player.userId, userName: player.userName, role,
     color: player.color, avatarUrl: player.avatarUrl || '',
     position: player.position, rotation: player.rotation,
-    viewMode: player.viewMode || '3d'
+    viewMode: player.viewMode || '3d',
+    isMobile: !!player.isMobile
   });
 
   log('Session', `Player ${client.playerId} joined ${session.id} as ${role} (total: ${session.players.size})`);
@@ -745,6 +750,70 @@ function broadcastSelection(session, excludeWs, playerId, targetId) {
   });
 }
 
+const BOT_MIRROR_COUNT = 3;
+const BOT_RELEASE_MIN_MS = 2000;
+const BOT_RELEASE_MAX_MS = 10000;
+
+function getBotMirrors(session) {
+  const ids = [];
+  for (const [pid, p] of session.players) {
+    const c = clients.get(p.ws);
+    if (c && c.isBot && (p.role === 'editor' || p.role === 'owner'))
+      ids.push(pid);
+  }
+  ids.sort((a, b) => a - b);
+  return ids.slice(0, Math.min(BOT_MIRROR_COUNT, ids.length));
+}
+
+function clearBotReleaseTimer(session, playerId) {
+  if (!session.botReleaseTimers) return;
+  const t = session.botReleaseTimers.get(playerId);
+  if (t) { clearTimeout(t); session.botReleaseTimers.delete(playerId); }
+}
+
+function scheduleBotRelease(session, playerId, targetId) {
+  if (!session.botReleaseTimers) session.botReleaseTimers = new Map();
+  clearBotReleaseTimer(session, playerId);
+  const delay = BOT_RELEASE_MIN_MS + Math.random() * (BOT_RELEASE_MAX_MS - BOT_RELEASE_MIN_MS);
+  const timer = setTimeout(() => {
+    session.botReleaseTimers?.delete(playerId);
+    if (session.playerSelections.get(playerId) !== targetId) return;
+    setBotSelection(session, playerId, '');
+    log('Select', `bot p${playerId} auto-released "${targetId.slice(-6)}" after ${(delay / 1000).toFixed(1)}s`);
+  }, delay);
+  session.botReleaseTimers.set(playerId, timer);
+}
+
+function setBotSelection(session, playerId, targetId) {
+  const prev = session.playerSelections.get(playerId);
+  if ((prev || '') === (targetId || '')) return;
+
+  if (prev) {
+    removeSelectionEntry(session, prev, playerId);
+    session.playerSelections.delete(playerId);
+    broadcastToSession(session, null, { type: 'DomainSelection', playerId, targetId: '' });
+  }
+
+  if (targetId) {
+    let arr = session.selections.get(targetId);
+    if (!arr) { arr = []; session.selections.set(targetId, arr); }
+    arr.push(playerId);
+    session.playerSelections.set(playerId, targetId);
+    broadcastToSession(session, null, { type: 'DomainSelection', playerId, targetId });
+    scheduleBotRelease(session, playerId, targetId);
+  } else {
+    clearBotReleaseTimer(session, playerId);
+  }
+}
+
+function mirrorSelectionToBots(session, sourceClient, targetId) {
+  if (!sourceClient || sourceClient.isBot) return;
+  const ids = getBotMirrors(session);
+  for (const pid of ids) setBotSelection(session, pid, targetId);
+  if (ids.length > 0)
+    log('Select', `mirror "${(targetId || '∅').slice(-6)}" to bots [${ids.join(',')}]`);
+}
+
 function handleDomainSelection(ws, client, msg) {
   const session = getSession(ws, client, true);
   if (!session) return;
@@ -764,6 +833,7 @@ function handleDomainSelection(ws, client, msg) {
       const n = broadcastSelection(session, ws, client.playerId, '');
       log('Select', `release "${released.slice(-6)}" by p${client.playerId} → ${n} peers`);
     }
+    mirrorSelectionToBots(session, client, '');
     return;
   }
 
@@ -783,6 +853,8 @@ function handleDomainSelection(ws, client, msg) {
 
   const n = broadcastSelection(session, ws, client.playerId, targetId);
   log('Select', `claim "${idTail}" by p${client.playerId} (slot ${arr.length}/${arr.length}) → ${n} peers`);
+
+  mirrorSelectionToBots(session, client, targetId);
 }
 
 function handleUpdateState(ws, client, msg) {
@@ -1130,7 +1202,7 @@ function connectBot(slot, inviteCode, rooms) {
   botWs.on('open', () => {
     const botClient = clients.get(botWs);
     if (botClient) botClient.isBot = true;
-    botWs.send(JSON.stringify({ type: 'JoinSession', inviteCode, userName: name, avatarUrl: slot.avatarUrl || '' }));
+    botWs.send(JSON.stringify({ type: 'JoinSession', inviteCode, userName: name, avatarUrl: slot.avatarUrl || '', isMobile: true }));
   });
 
   const chunkBuf = new Map(); // messageId -> { chunks[], total }
