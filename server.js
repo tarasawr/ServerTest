@@ -203,13 +203,6 @@ function broadcastToSession(session, excludeWs, obj) {
   let count = 0;
   for (const [, p] of session.players) {
     if (p.ws === excludeWs) continue;
-    if (p.ws._sessionStateSent === false) {
-      // Joining client is waiting for snapshot — buffer broadcasts so they
-      // don't receive deltas for entities that don't exist in their domain yet.
-      (p.ws._pendingBroadcasts ||= []).push(obj);
-      count++;
-      continue;
-    }
     if (p.ws.readyState === WebSocket.OPEN) {
       p.ws.send(data);
       count++;
@@ -218,12 +211,7 @@ function broadcastToSession(session, excludeWs, obj) {
   return count;
 }
 
-function makeSnapshotRequestId() {
-  return 'sr_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-}
-
-function flushPendingJoiner(session, entry) {
-  const { ws, role } = entry;
+function sendSessionStateTo(session, ws, role) {
   const client = clients.get(ws);
   if (!client || ws.readyState !== WebSocket.OPEN) return;
 
@@ -248,14 +236,6 @@ function flushPendingJoiner(session, entry) {
     playerId: client.playerId, inviteCode: session.inviteCode,
     selections
   });
-
-  ws._sessionStateSent = true;
-  const buffered = ws._pendingBroadcasts || [];
-  ws._pendingBroadcasts = null;
-  for (const obj of buffered) send(ws, obj);
-  if (buffered.length > 0) {
-    log('Session', `Flushed ${buffered.length} buffered broadcast(s) to p${client.playerId}`);
-  }
 }
 
 function canEdit(role) {
@@ -438,54 +418,11 @@ function handleJoinSession(ws, client, msg) {
 
   log('Session', `Player ${client.playerId} joined ${session.id} as ${role} (total: ${session.players.size})`);
 
-  // Pull fresh XML from owner before delivering SessionState to the joiner.
-  // Incoming broadcasts to this ws are buffered (see broadcastToSession) until flush.
-  ws._sessionStateSent = false;
-  ws._pendingBroadcasts = [];
-
-  const owner = session.players.get(session.ownerId);
-  const ownerAvailable = owner && owner.ws !== ws
-    && owner.ws.readyState === WebSocket.OPEN
-    && owner.ws._sessionStateSent !== false;
-
-  if (!ownerAvailable) {
-    // No owner to pull from (e.g. joiner is the first real player in a legacy flow,
-    // or owner just disconnected) — fall back to cached XML.
-    flushPendingJoiner(session, { ws, role });
-    return;
-  }
-
-  if (!session.pendingSnapshot) {
-    session.pendingSnapshot = {
-      requestId: makeSnapshotRequestId(),
-      joiners: []
-    };
-    send(owner.ws, { type: 'SnapshotRequest', requestId: session.pendingSnapshot.requestId });
-    log('Session', `Requested snapshot from owner p${owner.playerId} (reqId=${session.pendingSnapshot.requestId})`);
-  }
-  session.pendingSnapshot.joiners.push({ ws, role });
-}
-
-function handleSnapshotResponse(ws, client, msg) {
-  const session = getSession(ws, client, false);
-  if (!session) return;
-  if (client.playerId !== session.ownerId) {
-    log('Denied', `player=${client.playerId} snapshot_response (not owner)`);
-    return;
-  }
-  if (!session.pendingSnapshot || session.pendingSnapshot.requestId !== msg.requestId) {
-    log('Session', `Stale SnapshotResponse from p${client.playerId} (reqId=${msg.requestId})`);
-    return;
-  }
-
-  session.projectXml = msg.projectXml || session.projectXml;
-  projectsModule.onXmlUpdated(session.projectId, session.projectXml);
-
-  const joiners = session.pendingSnapshot.joiners;
-  session.pendingSnapshot = null;
-
-  log('Session', `SnapshotResponse ok (${(msg.projectXml || '').length} chars) → flushing ${joiners.length} joiner(s)`);
-  for (const entry of joiners) flushPendingJoiner(session, entry);
+  // Server is the source of truth for projectXml — owner keeps it fresh by pushing
+  // UpdateState before every committed mutation. Joiner receives cached state
+  // immediately; any committed delta still in flight will arrive via broadcast and
+  // apply idempotently on top.
+  sendSessionStateTo(session, ws, role);
 }
 
 function hasHumanPlayers(session) {
@@ -553,23 +490,6 @@ function leaveSession(ws, client) {
       });
 
       log('Session', `${session.id} ownership transferred to player ${nextPlayer.playerId} (total: ${session.players.size})`);
-
-      // If a snapshot pull was in-flight to the leaving owner, redirect to the new owner
-      // (or fall back to cached XML if no fully-joined owner remains).
-      if (session.pendingSnapshot) {
-        const newOwnerReady = nextPlayer.ws.readyState === WebSocket.OPEN
-          && nextPlayer.ws._sessionStateSent !== false;
-        if (newOwnerReady) {
-          session.pendingSnapshot.requestId = makeSnapshotRequestId();
-          send(nextPlayer.ws, { type: 'SnapshotRequest', requestId: session.pendingSnapshot.requestId });
-          log('Session', `Re-requested snapshot from new owner p${nextPlayer.playerId} (reqId=${session.pendingSnapshot.requestId})`);
-        } else {
-          const joiners = session.pendingSnapshot.joiners;
-          session.pendingSnapshot = null;
-          log('Session', `Owner left, no ready owner → flushing ${joiners.length} joiner(s) with cached XML`);
-          for (const entry of joiners) flushPendingJoiner(session, entry);
-        }
-      }
     }
   } else {
     broadcastToSession(session, ws, { type: 'PlayerLeft', playerId: client.playerId });
@@ -982,7 +902,6 @@ wss.on('connection', (ws) => {
       case 'DomainChange':  handleDomainChange(ws, client, msg); break;
       case 'DomainSelection': handleDomainSelection(ws, client, msg); break;
       case 'UpdateState':   handleUpdateState(ws, client, msg); break;
-      case 'SnapshotResponse': handleSnapshotResponse(ws, client, msg); break;
       case 'Ping': send(ws, { type: 'Pong' }); break;
       default:
         log('Warn', `Player ${client.playerId} sent unknown type: "${msg.type}"`);
