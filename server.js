@@ -6,6 +6,7 @@ const PORT = process.env.PORT || 3000;
 const LEGACY_INVITE = '__legacy__';
 let BOT_COUNT = 0; // bots auto-spawned per session (0 to disable)
 let BOT_VIEW_MODE = 'random'; // 'random', '2d', '3d' — forced view mode for bots
+let BOT_REJOIN = true; // whether bots disconnect after session time and reconnect
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -45,10 +46,19 @@ const server = http.createServer((req, res) => {
   // GET /bots?count=2 — spawn bots in all active sessions
   // GET /bots?count=0 — disable bots (new sessions won't get bots)
   // GET /bots?mode=2d|3d|random — force bot view mode
+  // GET /bots?rejoin=0|1 — toggle disconnect/reconnect cycle (0 keeps bots online forever)
+  // GET /bots?sessionMin=N&sessionMax=N — bot session duration in seconds (online time)
+  // GET /bots?offlineMin=N&offlineMax=N — bot offline duration in seconds (before reconnect)
   // GET /bots — show current settings
   if (url.pathname === '/bots') {
     const count = url.searchParams.get('count');
     const mode = url.searchParams.get('mode');
+    const rejoin = url.searchParams.get('rejoin');
+    const sessionMin = url.searchParams.get('sessionMin');
+    const sessionMax = url.searchParams.get('sessionMax');
+    const offlineMin = url.searchParams.get('offlineMin');
+    const offlineMax = url.searchParams.get('offlineMax');
+
     if (count !== null) {
       BOT_COUNT = Math.max(0, Math.min(10, parseInt(count) || 0));
       if (BOT_COUNT > 0) {
@@ -63,8 +73,43 @@ const server = http.createServer((req, res) => {
       BOT_VIEW_MODE = mode;
       log('Bots', `Bot view mode set to ${BOT_VIEW_MODE}`);
     }
+    if (rejoin !== null) {
+      BOT_REJOIN = !(rejoin === '0' || rejoin === 'false');
+      log('Bots', `Bot rejoin set to ${BOT_REJOIN}`);
+    }
+    if (sessionMin !== null) {
+      const v = Math.max(1, parseInt(sessionMin) || BOT_MIN_ONLINE_SEC);
+      BOT_MIN_ONLINE_SEC = v;
+      if (BOT_MAX_ONLINE_SEC < v) BOT_MAX_ONLINE_SEC = v;
+      log('Bots', `Bot sessionMin set to ${BOT_MIN_ONLINE_SEC}s`);
+    }
+    if (sessionMax !== null) {
+      const v = Math.max(BOT_MIN_ONLINE_SEC, parseInt(sessionMax) || BOT_MAX_ONLINE_SEC);
+      BOT_MAX_ONLINE_SEC = v;
+      log('Bots', `Bot sessionMax set to ${BOT_MAX_ONLINE_SEC}s`);
+    }
+    if (offlineMin !== null) {
+      const v = Math.max(0, parseInt(offlineMin) || BOT_MIN_OFFLINE_SEC);
+      BOT_MIN_OFFLINE_SEC = v;
+      if (BOT_MAX_OFFLINE_SEC < v) BOT_MAX_OFFLINE_SEC = v;
+      log('Bots', `Bot offlineMin set to ${BOT_MIN_OFFLINE_SEC}s`);
+    }
+    if (offlineMax !== null) {
+      const v = Math.max(BOT_MIN_OFFLINE_SEC, parseInt(offlineMax) || BOT_MAX_OFFLINE_SEC);
+      BOT_MAX_OFFLINE_SEC = v;
+      log('Bots', `Bot offlineMax set to ${BOT_MAX_OFFLINE_SEC}s`);
+    }
+
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ botCount: BOT_COUNT, viewMode: BOT_VIEW_MODE }));
+    res.end(JSON.stringify({
+      botCount: BOT_COUNT,
+      viewMode: BOT_VIEW_MODE,
+      rejoin: BOT_REJOIN,
+      sessionMin: BOT_MIN_ONLINE_SEC,
+      sessionMax: BOT_MAX_ONLINE_SEC,
+      offlineMin: BOT_MIN_OFFLINE_SEC,
+      offlineMax: BOT_MAX_OFFLINE_SEC
+    }));
     return;
   }
 
@@ -1139,10 +1184,10 @@ function filterIndoorRooms(rooms) {
 }
 
 // Per-session bot manager: randomly connects/disconnects bots to simulate real players
-const BOT_MIN_ONLINE_SEC = 15;   // min time bot stays connected
-const BOT_MAX_ONLINE_SEC = 60;   // max time bot stays connected
-const BOT_MIN_OFFLINE_SEC = 5;   // min time before bot reconnects
-const BOT_MAX_OFFLINE_SEC = 30;  // max time before bot reconnects
+let BOT_MIN_ONLINE_SEC = 15;   // min time bot stays connected
+let BOT_MAX_ONLINE_SEC = 60;   // max time bot stays connected
+let BOT_MIN_OFFLINE_SEC = 5;   // min time before bot reconnects
+let BOT_MAX_OFFLINE_SEC = 30;  // max time before bot reconnects
 const sessionBotManagers = new Map(); // inviteCode -> BotManager
 
 function randBetween(min, max) { return min + Math.random() * (max - min); }
@@ -1274,17 +1319,17 @@ function connectBot(slot, inviteCode, rooms) {
         botWs.send(JSON.stringify({ type: 'Move', position: { x, y: sendY, z }, rotation: { x: 0, y: sendRotY, z: 0 }, viewMode }));
       }, BOT_MOVE_INTERVAL);
 
-      // Schedule random disconnect
-      const onlineTime = randBetween(BOT_MIN_ONLINE_SEC, BOT_MAX_ONLINE_SEC) * 1000;
-      setTimeout(() => {
-        if (slot.botWs === botWs && botWs.readyState === WebSocket.OPEN) {
-          log('Bots', `${name} disconnecting (was online ${(onlineTime / 1000).toFixed(0)}s)`);
-          disconnectBot(slot);
-          // Schedule reconnect
-          const offlineTime = randBetween(BOT_MIN_OFFLINE_SEC, BOT_MAX_OFFLINE_SEC) * 1000;
-          slot.reconnectTimer = setTimeout(() => connectBot(slot, inviteCode, rooms), offlineTime);
-        }
-      }, onlineTime);
+      if (BOT_REJOIN) {
+        const onlineTime = randBetween(BOT_MIN_ONLINE_SEC, BOT_MAX_ONLINE_SEC) * 1000;
+        setTimeout(() => {
+          if (slot.botWs === botWs && botWs.readyState === WebSocket.OPEN) {
+            log('Bots', `${name} disconnecting (was online ${(onlineTime / 1000).toFixed(0)}s)`);
+            disconnectBot(slot);
+            const offlineTime = randBetween(BOT_MIN_OFFLINE_SEC, BOT_MAX_OFFLINE_SEC) * 1000;
+            slot.reconnectTimer = setTimeout(() => connectBot(slot, inviteCode, rooms), offlineTime);
+          }
+        }, onlineTime);
+      }
     }
     if (msg.type === 'SessionError') log('Bots', `${name} error: ${msg.code}`);
   });
