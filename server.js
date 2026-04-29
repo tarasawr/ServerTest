@@ -808,8 +808,10 @@ function broadcastSelection(session, excludeWs, playerId, targetId) {
 }
 
 const BOT_MIRROR_COUNT = 2;
-const BOT_RELEASE_MIN_MS = 2000;
-const BOT_RELEASE_MAX_MS = 10000;
+const BOT_RELEASE_MIN_MS = 4000;
+const BOT_RELEASE_MAX_MS = 8000;
+const BOT_RECLAIM_MIN_MS = 1000;
+const BOT_RECLAIM_MAX_MS = 3000;
 
 function getBotMirrors(session) {
   const mirrorBots = [];
@@ -840,6 +842,36 @@ function scheduleBotRelease(session, playerId, targetId) {
     if (session.playerSelections.get(playerId) !== targetId) return;
     setBotSelection(session, playerId, '');
     log('Select', `bot p${playerId} auto-released "${targetId.slice(-6)}" after ${(delay / 1000).toFixed(1)}s`);
+    scheduleBotReclaim(session, playerId);
+  }, delay);
+  session.botReleaseTimers.set(playerId, timer);
+}
+
+function findActiveUserTarget(session) {
+  for (const [pid, p] of session.players) {
+    const c = clients.get(p.ws);
+    if (c && !c.isBot) {
+      const t = session.playerSelections.get(pid);
+      if (t) return t;
+    }
+  }
+  return null;
+}
+
+function scheduleBotReclaim(session, playerId) {
+  const userTarget = findActiveUserTarget(session);
+  if (!userTarget) return;
+
+  if (!session.botReleaseTimers) session.botReleaseTimers = new Map();
+  clearBotReleaseTimer(session, playerId);
+  const delay = BOT_RECLAIM_MIN_MS + Math.random() * (BOT_RECLAIM_MAX_MS - BOT_RECLAIM_MIN_MS);
+  const timer = setTimeout(() => {
+    session.botReleaseTimers?.delete(playerId);
+    const stillActive = findActiveUserTarget(session);
+    if (!stillActive) return;
+    if (session.playerSelections.has(playerId)) return;
+    setBotSelection(session, playerId, stillActive);
+    log('Select', `bot p${playerId} re-claimed "${stillActive.slice(-6)}" after ${(delay / 1000).toFixed(1)}s`);
   }, delay);
   session.botReleaseTimers.set(playerId, timer);
 }
