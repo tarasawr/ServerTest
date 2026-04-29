@@ -807,7 +807,7 @@ function broadcastSelection(session, excludeWs, playerId, targetId) {
   });
 }
 
-const BOT_MIRROR_COUNT = 2;
+const BOT_MIRROR_COUNT = 6;
 const BOT_RELEASE_MIN_MS = 4000;
 const BOT_RELEASE_MAX_MS = 8000;
 const BOT_RECLAIM_MIN_MS = 1000;
