@@ -854,11 +854,21 @@ function setBotSelection(session, playerId, targetId) {
 }
 
 function mirrorSelectionToBots(session, sourceClient, targetId) {
-  if (!sourceClient || sourceClient.isBot) return;
+  if (!sourceClient) { log('Mirror', 'skip: no sourceClient'); return; }
+  if (sourceClient.isBot) { log('Mirror', `skip: source p${sourceClient.playerId} is bot`); return; }
+
+  let total = 0, bots = 0, eligible = 0;
+  for (const [pid, p] of session.players) {
+    total++;
+    const c = clients.get(p.ws);
+    const isBot = !!(c && c.isBot);
+    if (isBot) bots++;
+    if (isBot && (p.role === 'editor' || p.role === 'owner')) eligible++;
+  }
+
   const ids = getBotMirrors(session);
   for (const pid of ids) setBotSelection(session, pid, targetId);
-  if (ids.length > 0)
-    log('Select', `mirror "${(targetId || '∅').slice(-6)}" to bots [${ids.join(',')}]`);
+  log('Mirror', `target=${(targetId || '∅').slice(-6)} src=p${sourceClient.playerId} session.players=${total} bots=${bots} eligible=${eligible} mirrored=[${ids.join(',')}]`);
 }
 
 function handleDomainSelection(ws, client, msg) {
