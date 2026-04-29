@@ -227,8 +227,9 @@ function sendSessionStateTo(session, ws, role) {
 
   ensureSelectionMaps(session);
   const selections = [];
-  for (const [targetId, playerId] of session.selections)
-    selections.push({ playerId, targetId });
+  for (const [targetId, playerIds] of session.selections)
+    for (const playerId of playerIds)
+      selections.push({ playerId, targetId });
 
   send(ws, {
     type: 'SessionState', projectXml: session.projectXml,
@@ -418,10 +419,6 @@ function handleJoinSession(ws, client, msg) {
 
   log('Session', `Player ${client.playerId} joined ${session.id} as ${role} (total: ${session.players.size})`);
 
-  // Server is the source of truth for projectXml — owner keeps it fresh by pushing
-  // UpdateState before every committed mutation. Joiner receives cached state
-  // immediately; any committed delta still in flight will arrive via broadcast and
-  // apply idempotently on top.
   sendSessionStateTo(session, ws, role);
 }
 
@@ -595,14 +592,16 @@ function handleDomainLifecycle(ws, client, msg) {
       }
     }
 
-    // Drop selection lock if the removed entity was selected
     ensureSelectionMaps(session);
     if (session.selections.has(msg.uniqueId)) {
-      const lockOwner = session.selections.get(msg.uniqueId);
+      const holders = session.selections.get(msg.uniqueId);
       session.selections.delete(msg.uniqueId);
-      session.playerSelections.delete(lockOwner);
-      broadcastSelection(session, null, lockOwner, '');
-      log('Select', `auto-release "${(msg.uniqueId || '').slice(-6)}" (entity removed)`);
+      for (const holderId of holders) {
+        if (session.playerSelections.get(holderId) === msg.uniqueId)
+          session.playerSelections.delete(holderId);
+        broadcastSelection(session, null, holderId, '');
+      }
+      log('Select', `auto-release "${(msg.uniqueId || '').slice(-6)}" (entity removed, ${holders.length} holder(s))`);
     }
 
     const n = broadcastToSession(session, ws, {
@@ -680,10 +679,7 @@ function handleDomainChange(ws, client, msg) {
   log('Domain', `change batch: ${winningTargets.length} targets by player=${client.playerId} → ${n} peers (${summary})`);
 }
 
-// --- Domain selection (per-player object lock) ---
-// Семантика: один игрок держит максимум один targetId. First-wins: если объект
-// уже занят другим игроком, попытка отвергается молча (клиент сам почистит локальный
-// selection через guard). Снятие выделения = пустой targetId.
+// --- Domain selection (multi-player) ---
 
 function ensureSelectionMaps(session) {
   if (!session.selections) session.selections = new Map();
@@ -696,7 +692,6 @@ function touchPlayerActivity(session, playerId) {
   session.lastActivityByPlayer.set(playerId, Date.now());
 }
 
-// Auto-release locks held by silent players (heartbeat/network gone, app suspended).
 const LOCK_TTL_MS = 60_000;
 const LOCK_SWEEP_INTERVAL_MS = 15_000;
 
@@ -707,12 +702,14 @@ setInterval(() => {
     if (!session.lastActivityByPlayer) continue;
 
     const stale = [];
-    for (const [targetId, playerId] of session.selections) {
-      const last = session.lastActivityByPlayer.get(playerId) || 0;
-      if (now - last > LOCK_TTL_MS) stale.push({ targetId, playerId, idle: now - last });
+    for (const [targetId, playerIds] of session.selections) {
+      for (const playerId of playerIds) {
+        const last = session.lastActivityByPlayer.get(playerId) || 0;
+        if (now - last > LOCK_TTL_MS) stale.push({ targetId, playerId, idle: now - last });
+      }
     }
     for (const entry of stale) {
-      session.selections.delete(entry.targetId);
+      removeSelectionEntry(session, entry.targetId, entry.playerId);
       if (session.playerSelections.get(entry.playerId) === entry.targetId)
         session.playerSelections.delete(entry.playerId);
       broadcastSelection(session, null, entry.playerId, '');
@@ -721,13 +718,22 @@ setInterval(() => {
   }
 }, LOCK_SWEEP_INTERVAL_MS);
 
+function removeSelectionEntry(session, targetId, playerId) {
+  const arr = session.selections.get(targetId);
+  if (!arr) return false;
+  const idx = arr.indexOf(playerId);
+  if (idx < 0) return false;
+  arr.splice(idx, 1);
+  if (arr.length === 0) session.selections.delete(targetId);
+  return true;
+}
+
 function releasePlayerSelection(session, playerId) {
   ensureSelectionMaps(session);
   const prev = session.playerSelections.get(playerId);
   if (!prev) return null;
   session.playerSelections.delete(playerId);
-  if (session.selections.get(prev) === playerId)
-    session.selections.delete(prev);
+  removeSelectionEntry(session, prev, playerId);
   return prev;
 }
 
@@ -752,7 +758,6 @@ function handleDomainSelection(ws, client, msg) {
   const targetId = (msg.targetId || '').trim();
   const idTail = targetId ? targetId.slice(-6) : '∅';
 
-  // Deselect (empty targetId)
   if (!targetId) {
     const released = releasePlayerSelection(session, client.playerId);
     if (released) {
@@ -762,26 +767,22 @@ function handleDomainSelection(ws, client, msg) {
     return;
   }
 
-  // First-wins: target already owned by someone else → reject silently
-  const owner = session.selections.get(targetId);
-  if (owner !== undefined && owner !== client.playerId) {
-    log('Denied', `player=${client.playerId} select "${idTail}" (locked by p${owner})`);
-    return;
-  }
+  if (session.playerSelections.get(client.playerId) === targetId) return;
 
-  // Same target already held by this player → no-op
-  if (owner === client.playerId) return;
-
-  // Release any previous selection of this player, then claim the new target
   const released = releasePlayerSelection(session, client.playerId);
   if (released)
     broadcastSelection(session, ws, client.playerId, '');
 
-  session.selections.set(targetId, client.playerId);
+  let arr = session.selections.get(targetId);
+  if (!arr) {
+    arr = [];
+    session.selections.set(targetId, arr);
+  }
+  arr.push(client.playerId);
   session.playerSelections.set(client.playerId, targetId);
 
   const n = broadcastSelection(session, ws, client.playerId, targetId);
-  log('Select', `claim "${idTail}" by p${client.playerId} → ${n} peers`);
+  log('Select', `claim "${idTail}" by p${client.playerId} (slot ${arr.length}/${arr.length}) → ${n} peers`);
 }
 
 function handleUpdateState(ws, client, msg) {
