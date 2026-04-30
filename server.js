@@ -349,7 +349,7 @@ function getOrCreateLegacySession(ws, client) {
 
   const player = {
     playerId: client.playerId, userId: null,
-    userName: `Player ${client.playerId}`, role: 'owner',
+    userName: `Designer ${client.playerId}`, role: 'owner',
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
     viewMode: '3d', isMobile: false, ws
   };
@@ -461,7 +461,7 @@ function handleJoinSession(ws, client, msg) {
 
   const player = {
     playerId: client.playerId, userId: msg.userId || null,
-    userName: msg.userName || `Player ${client.playerId}`, role,
+    userName: msg.userName || `Designer ${client.playerId}`, role,
     color: pickColor(session), avatarUrl: msg.avatarUrl || '',
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
     viewMode: '3d', isMobile: !!msg.isMobile, ws
