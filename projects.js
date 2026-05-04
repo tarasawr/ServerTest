@@ -91,6 +91,32 @@ function getEffectiveRole(proj, userId) {
   return user.role !== null ? user.role : proj.globalRole;
 }
 
+// Pushes a RoleChanged message to every player currently in any session linked to this project.
+// Also synchronizes session.players[*].role so the server-side canEdit() gate uses the fresh role.
+// userId may be '' for a global-role change (applies to all guests whose effective role inherits global).
+function broadcastRoleChanged(sessions, projectId, userId, newRole) {
+  if (!sessions) return;
+  const proj = projects.get(projectId);
+  const wireRole = (newRole === 'can_edit') ? 'editor' : 'viewer';
+  const msg = JSON.stringify({ type: 'RoleChanged', projectId, userId: userId || '', newRole });
+  for (const [, s] of sessions) {
+    if (s.projectId !== projectId) continue;
+    for (const [, p] of s.players) {
+      if (p.role !== 'owner') {
+        // Per-user broadcast: only the targeted user.
+        // Global broadcast: all session players whose stored DB role is null (= inherits global).
+        const isTarget = userId
+          ? p.userId === userId
+          : (p.userId && proj && proj.users.has(p.userId) && proj.users.get(p.userId).role === null);
+        if (isTarget) p.role = wireRole;
+      }
+      if (p.ws && p.ws.readyState === 1 /* OPEN */) {
+        try { p.ws.send(msg); } catch (_) {}
+      }
+    }
+  }
+}
+
 function serializeUsers(usersMap, proj) {
   const list = [];
   for (const [, u] of usersMap) {
@@ -278,7 +304,7 @@ function handleGetThumbnail(res, projectId) {
   }
 }
 
-async function handlePutUserRole(req, res, projectId, userId) {
+async function handlePutUserRole(req, res, projectId, userId, sessions) {
   if (!projects.has(projectId)) {
     return jsonErr(res, 404, `Project ${projectId} not found`);
   }
@@ -299,10 +325,13 @@ async function handlePutUserRole(req, res, projectId, userId) {
   proj.users.get(userId).role = role;
   log('Projects', `Role of user ${userId} in project ${projectId} changed to ${role}`);
   saveToFile();
+
+  broadcastRoleChanged(sessions, projectId, userId, role);
+
   jsonOk(res, { ok: true, role });
 }
 
-async function handlePutProjectGlobalRole(req, res, projectId) {
+async function handlePutProjectGlobalRole(req, res, projectId, sessions) {
   if (!projects.has(projectId)) {
     return jsonErr(res, 404, `Project ${projectId} not found`);
   }
@@ -321,6 +350,11 @@ async function handlePutProjectGlobalRole(req, res, projectId) {
   proj.globalRole = globalRole;
   log('Projects', `Global role of project ${projectId} changed to ${globalRole} by owner ${ownerUserId}`);
   saveToFile();
+
+  // userId === '' means "global role change applies to everyone whose effective role is 'global'".
+  // Per-user role overrides are NOT rewritten — they keep their explicit assignment.
+  broadcastRoleChanged(sessions, projectId, '', globalRole);
+
   jsonOk(res, { ok: true, globalRole });
 }
 
@@ -380,7 +414,8 @@ async function handleDeleteProject(req, res, projectId, sessions) {
 
   // Terminate all active multiplayer sessions linked to this project
   if (sessions) {
-    const closedMsg = JSON.stringify({ type: 'session_closed', reason: 'sharing_stopped' });
+    // Wire format must be PascalCase to match the Unity-side MessageType enum (case-sensitive Enum.TryParse).
+    const closedMsg = JSON.stringify({ type: 'SessionClosed', reason: 'sharing_stopped' });
     for (const [inviteCode, s] of sessions) {
       if (s.projectId !== projectId) continue;
       for (const [, player] of s.players) {
@@ -397,7 +432,7 @@ async function handleDeleteProject(req, res, projectId, sessions) {
   jsonOk(res, { ok: true });
 }
 
-async function handleDeleteUser(req, res, projectId, userId) {
+async function handleDeleteUser(req, res, projectId, userId, sessions) {
   if (!projects.has(projectId)) {
     return jsonErr(res, 404, `Project ${projectId} not found`);
   }
@@ -419,6 +454,24 @@ async function handleDeleteUser(req, res, projectId, userId) {
   proj.users.delete(userId);
   log('Projects', `User ${userId} removed from project ${projectId} by owner`);
   saveToFile();
+
+  // Notify the kicked player (if currently in a session linked to this project) and force-close their WS.
+  // The server's existing leaveSession/close handler will broadcast PlayerLeft (or OwnerChanged if the kicked
+  // user was the session host) — we intentionally do NOT manually transfer ownership to avoid double-fire.
+  if (sessions) {
+    const kickMsg = JSON.stringify({ type: 'UserRemoved', projectId, userId });
+    for (const [, s] of sessions) {
+      if (s.projectId !== projectId) continue;
+      for (const [, p] of s.players) {
+        if (p.userId !== userId) continue;
+        if (p.ws && p.ws.readyState === 1 /* OPEN */) {
+          try { p.ws.send(kickMsg); } catch (_) {}
+          try { p.ws.close(); } catch (_) {}
+        }
+      }
+    }
+  }
+
   jsonOk(res, { ok: true });
 }
 
@@ -545,13 +598,13 @@ function handleRequest(req, res, url, sessions) {
   const userRoleM = p.match(/^\/projects\/([^\/]+)\/users\/([^\/]+)\/role$/);
   if (userRoleM) {
     if (req.method === 'GET') { handleGetUserRole(res, userRoleM[1], decodeURIComponent(userRoleM[2])); return true; }
-    if (req.method === 'PUT') { handlePutUserRole(req, res, userRoleM[1], decodeURIComponent(userRoleM[2])); return true; }
+    if (req.method === 'PUT') { handlePutUserRole(req, res, userRoleM[1], decodeURIComponent(userRoleM[2]), sessions); return true; }
   }
 
   // DELETE /projects/:id/users/:uid
   const userM = p.match(/^\/projects\/([^\/]+)\/users\/([^\/]+)$/);
   if (userM && req.method === 'DELETE') {
-    handleDeleteUser(req, res, userM[1], decodeURIComponent(userM[2]));
+    handleDeleteUser(req, res, userM[1], decodeURIComponent(userM[2]), sessions);
     return true;
   }
 
@@ -565,7 +618,7 @@ function handleRequest(req, res, url, sessions) {
   // PUT /projects/:id/globalRole
   const projGlobalRoleM = p.match(/^\/projects\/([^\/]+)\/globalRole$/);
   if (projGlobalRoleM && req.method === 'PUT') {
-    handlePutProjectGlobalRole(req, res, projGlobalRoleM[1]);
+    handlePutProjectGlobalRole(req, res, projGlobalRoleM[1], sessions);
     return true;
   }
 
