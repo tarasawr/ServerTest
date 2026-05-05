@@ -395,7 +395,7 @@ async function handleDeleteAllUsers(req, res, projectId) {
   jsonOk(res, { ok: true, removedCount });
 }
 
-async function handleDeleteProject(req, res, projectId, sessions) {
+async function handleDeleteProject(req, res, projectId, sessions, projectIndex) {
   if (!projects.has(projectId)) {
     return jsonErr(res, 404, `Project ${projectId} not found`);
   }
@@ -425,6 +425,7 @@ async function handleDeleteProject(req, res, projectId, sessions) {
         }
       }
       sessions.delete(inviteCode);
+      if (projectIndex && s.projectId) projectIndex.delete(s.projectId);
       log('Projects', `Session ${inviteCode} terminated (project ${projectId} sharing stopped)`);
     }
   }
@@ -541,7 +542,7 @@ function handleGetProjectActiveUsers(res, projectId, sessions) {
   jsonOk(res, { users: list });
 }
 
-async function handleLinkSession(req, res, inviteCode, sessions) {
+async function handleLinkSession(req, res, inviteCode, sessions, projectIndex) {
   const body = await readBody(req);
   const { projectId } = body;
 
@@ -551,20 +552,40 @@ async function handleLinkSession(req, res, inviteCode, sessions) {
   if (!projects.has(projectId)) {
     return jsonErr(res, 404, `Project ${projectId} not found`);
   }
+  if (inviteCode === '__legacy__') {
+    return jsonErr(res, 400, 'Cannot link legacy session');
+  }
 
   const session = sessions.get(inviteCode);
   if (!session) {
     return jsonErr(res, 404, `Session ${inviteCode} not found`);
   }
 
+  if (session.projectId === projectId) {
+    return jsonOk(res, { ok: true, alreadyLinked: true });
+  }
+
+  if (session.projectId && session.projectId !== projectId) {
+    return jsonErr(res, 409, 'Session already linked to another project');
+  }
+
+  // session.projectId == null → adopt the new projectId.
+  // Guard: if another session is already indexed for this projectId, refuse —
+  // otherwise we'd silently orphan that session in the index.
+  if (projectIndex && projectIndex.has(projectId) && projectIndex.get(projectId) !== inviteCode) {
+    return jsonErr(res, 409, 'Another session is already linked to this project');
+  }
+
   session.projectId = projectId;
+  if (projectIndex) projectIndex.set(projectId, inviteCode);
+
   log('Projects', `Session ${inviteCode} linked to project ${projectId}`);
   jsonOk(res, { ok: true });
 }
 
 // --- Main export ---
 
-function handleRequest(req, res, url, sessions) {
+function handleRequest(req, res, url, sessions, projectIndex) {
   const p = url.pathname;
 
   // POST /projects
@@ -662,13 +683,13 @@ function handleRequest(req, res, url, sessions) {
   const projectM = p.match(/^\/projects\/([^\/]+)$/);
   if (projectM) {
     if (req.method === 'GET') { handleGetProject(res, projectM[1]); return true; }
-    if (req.method === 'DELETE') { handleDeleteProject(req, res, projectM[1], sessions); return true; }
+    if (req.method === 'DELETE') { handleDeleteProject(req, res, projectM[1], sessions, projectIndex); return true; }
   }
 
   // PUT /sessions/:inviteCode/project
   const sessLinkM = p.match(/^\/sessions\/([^\/]+)\/project$/);
   if (sessLinkM && req.method === 'PUT') {
-    handleLinkSession(req, res, sessLinkM[1], sessions);
+    handleLinkSession(req, res, sessLinkM[1], sessions, projectIndex);
     return true;
   }
 

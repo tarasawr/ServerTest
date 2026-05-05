@@ -166,7 +166,7 @@ const server = http.createServer((req, res) => {
     }
   }
 
-  if (projectsModule.handleRequest(req, res, url, sessions)) return;
+  if (projectsModule.handleRequest(req, res, url, sessions, projectIndex)) return;
 
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end(`Multiplayer server OK. Sessions: ${sessions.size}, Clients: ${clients.size}`);
@@ -178,6 +178,7 @@ const wss = new WebSocket.Server({ server });
 
 let nextPlayerId = 1;
 const sessions = new Map();  // inviteCode -> Session
+const projectIndex = new Map();  // projectId -> inviteCode (only for sessions with non-empty projectId)
 const clients = new Map();   // WebSocket -> ClientState
 let testCoordination = { phase: 'idle' };  // Test coordination state (GET/POST /test)
 
@@ -393,12 +394,37 @@ function getSession(ws, client, autoJoinLegacy) {
 function handleCreateSession(ws, client, msg) {
   if (client.sessionId) { sendError(ws, 'ALREADY_IN_SESSION', 'Already in a session'); return; }
 
-  // Dev mode: if another non-legacy session exists, auto-join it instead of creating a new one
-  for (const [code, existing] of sessions) {
-    if (code === LEGACY_INVITE) continue;
-    if (existing.players.size > 0) {
-      log('Session', `Dev auto-join: player ${client.playerId} → existing session ${existing.id} (invite: ${code})`);
-      msg.inviteCode = code;
+  const projectId = msg.projectId || null;
+
+  // Reuse existing session if one is already linked to this projectId
+  if (projectId && projectIndex.has(projectId)) {
+    const inviteCode = projectIndex.get(projectId);
+    const existing = sessions.get(inviteCode);
+    if (!existing) {
+      // Defensive: stale index entry — drop it and fall through to create
+      projectIndex.delete(projectId);
+    } else {
+      const isOwnerRejoin = msg.userId && msg.userId === existing.ownerUserId;
+
+      // linkPermission='none' bypass for the owner (so they can always rejoin their own project)
+      if (existing.linkPermission === 'none' && !isOwnerRejoin) {
+        sendError(ws, 'NO_ACCESS', 'Link disabled');
+        return;
+      }
+
+      if (existing.players.size >= 25) {
+        sendError(ws, 'SESSION_FULL', 'Max 25 players');
+        return;
+      }
+
+      // Owner-rejoin ownership reset: refresh ownerId to the new playerId so UpdateState
+      // (which compares client.playerId to session.ownerId) accepts the returning owner.
+      if (isOwnerRejoin) {
+        existing.ownerId = client.playerId;
+      }
+
+      msg.inviteCode = inviteCode;
+      log('Session', `Session reuse: project=${projectId} → invite=${inviteCode}, player ${client.playerId}`);
       return handleJoinSession(ws, client, msg);
     }
   }
@@ -412,7 +438,7 @@ function handleCreateSession(ws, client, msg) {
     id: sessionId, inviteCode, ownerId: client.playerId,
     ownerUserId: msg.userId || null, projectXml: msg.projectXml || '',
     linkPermission, sequenceNumber: 0,
-    projectId: null,
+    projectId: projectId,
     players: new Map(),
     entityState: new Map(),
     selections: new Map(),         // targetId -> playerId
@@ -431,6 +457,7 @@ function handleCreateSession(ws, client, msg) {
   session.players.set(client.playerId, player);
 
   sessions.set(inviteCode, session);
+  if (projectId) projectIndex.set(projectId, inviteCode);
   client.sessionId = sessionId;
 
   send(ws, {
@@ -450,7 +477,8 @@ function handleJoinSession(ws, client, msg) {
 
   const session = sessions.get(msg.inviteCode);
   if (!session) { sendError(ws, 'NOT_FOUND', `Session not found: ${msg.inviteCode}`); return; }
-  if (session.linkPermission === 'none') { sendError(ws, 'NO_ACCESS', 'Link disabled'); return; }
+  const isOwnerRejoin = msg.userId && msg.userId === session.ownerUserId;
+  if (session.linkPermission === 'none' && !isOwnerRejoin) { sendError(ws, 'NO_ACCESS', 'Link disabled'); return; }
   if (session.players.size >= 25) { sendError(ws, 'SESSION_FULL', 'Max 25 players'); return; }
 
   if (msg.isBot) client.isBot = true;
@@ -535,6 +563,7 @@ function leaveSession(ws, client) {
     if (session.players.size === 0) {
       // No players left → delete session
       sessions.delete(session.inviteCode);
+      if (session.projectId) projectIndex.delete(session.projectId);
       log('Session', `${session.id} closed (owner left, no players remaining)`);
     } else {
       // Transfer ownership to next player
@@ -559,6 +588,7 @@ function leaveSession(ws, client) {
   // Clean up empty legacy session
   if (session.inviteCode === LEGACY_INVITE && session.players.size === 0) {
     sessions.delete(LEGACY_INVITE);
+    if (session.projectId) projectIndex.delete(session.projectId);
     log('Legacy', 'Session removed (empty)');
   }
 }
