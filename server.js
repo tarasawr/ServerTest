@@ -271,6 +271,9 @@ function sendSessionStateTo(session, ws, role) {
 
   const presence = [];
   for (const [, p] of session.players) {
+    // Skip players who haven't sent their first real position yet — others will
+    // see them appear via deferred PlayerJoined broadcast (sent on first non-zero Move).
+    if (p.pendingJoinedBroadcast && p.ws !== ws) continue;
     presence.push({
       playerId: p.playerId, userId: p.userId, userName: p.userName,
       role: p.role, color: p.color, avatarUrl: p.avatarUrl || '',
@@ -352,14 +355,15 @@ function getOrCreateLegacySession(ws, client) {
     playerId: client.playerId, userId: null,
     userName: `Designer ${client.playerId}`, role: 'owner',
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
-    viewMode: '3d', isMobile: false, ws
+    viewMode: '3d', isMobile: false, ws,
+    pendingJoinedBroadcast: true
   };
   session.players.set(client.playerId, player);
   client.sessionId = session.id;
 
   const existing = [];
   for (const [, p] of session.players) {
-    if (p.playerId !== client.playerId)
+    if (p.playerId !== client.playerId && !p.pendingJoinedBroadcast)
       existing.push({
         id: p.playerId, userName: p.userName, color: p.color,
         position: p.position, rotation: p.rotation,
@@ -368,13 +372,6 @@ function getOrCreateLegacySession(ws, client) {
       });
   }
   send(ws, { type: 'Welcome', playerId: client.playerId, role: player.role, players: existing });
-
-  broadcastToSession(session, ws, {
-    type: 'PlayerJoined', playerId: client.playerId,
-    position: player.position, rotation: player.rotation,
-    viewMode: player.viewMode || '3d',
-    isMobile: !!player.isMobile
-  });
 
   log('Legacy', `Player ${client.playerId} auto-joined (total: ${session.players.size})`);
   return session;
@@ -493,22 +490,14 @@ function handleJoinSession(ws, client, msg) {
     userName: msg.userName || `Designer ${client.playerId}`, role,
     color: pickColor(session), avatarUrl: msg.avatarUrl || '',
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
-    viewMode: '3d', isMobile: !!msg.isMobile, ws
+    viewMode: '3d', isMobile: !!msg.isMobile, ws,
+    pendingJoinedBroadcast: true
   };
 
   session.players.set(client.playerId, player);
   client.sessionId = session.id;
 
-  broadcastToSession(session, ws, {
-    type: 'PlayerJoined', playerId: client.playerId,
-    userId: player.userId, userName: player.userName, role,
-    color: player.color, avatarUrl: player.avatarUrl || '',
-    position: player.position, rotation: player.rotation,
-    viewMode: player.viewMode || '3d',
-    isMobile: !!player.isMobile
-  });
-
-  log('Session', `Player ${client.playerId} joined ${session.id} as ${role} (total: ${session.players.size})`);
+  log('Session', `Player ${client.playerId} joined ${session.id} as ${role} (total: ${session.players.size}) — PlayerJoined deferred until first Move`);
 
   sendSessionStateTo(session, ws, role);
 }
@@ -606,11 +595,34 @@ function handleMove(ws, client, msg) {
     if (msg.viewMode) player.viewMode = msg.viewMode;
   }
 
+  // Defer PlayerJoined broadcast until the new player reports a real (non-zero) position.
+  // Avoids spawning the avatar at (0,0,0) and snapping/lerping later.
+  if (player && player.pendingJoinedBroadcast && isNonZeroPosition(msg.position)) {
+    player.pendingJoinedBroadcast = false;
+    broadcastToSession(session, ws, {
+      type: 'PlayerJoined', playerId: client.playerId,
+      userId: player.userId, userName: player.userName, role: player.role,
+      color: player.color, avatarUrl: player.avatarUrl || '',
+      position: player.position, rotation: player.rotation,
+      viewMode: player.viewMode || '3d',
+      isMobile: !!player.isMobile
+    });
+    log('Session', `Player ${client.playerId} PlayerJoined broadcast (first real position received)`);
+  }
+
+  // Don't relay PlayerMoved while the player is still pending — others don't know about them yet.
+  if (player && player.pendingJoinedBroadcast) return;
+
   broadcastToSession(session, ws, {
     type: 'PlayerMoved', playerId: client.playerId,
     position: msg.position, rotation: msg.rotation,
     viewMode: msg.viewMode || '3d'
   });
+}
+
+function isNonZeroPosition(pos) {
+  if (!pos) return false;
+  return Math.abs(pos.x) > 0.001 || Math.abs(pos.y) > 0.001 || Math.abs(pos.z) > 0.001;
 }
 
 function handleDomainTransform(ws, client, msg) {
