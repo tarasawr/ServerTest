@@ -361,7 +361,8 @@ function getOrCreateLegacySession(ws, client) {
     if (p.playerId !== client.playerId)
       existing.push({
         id: p.playerId, userName: p.userName, color: p.color,
-        position: p.position, viewMode: p.viewMode || '3d',
+        position: p.position, rotation: p.rotation,
+        viewMode: p.viewMode || '3d',
         isMobile: !!p.isMobile
       });
   }
