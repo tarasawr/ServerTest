@@ -5,7 +5,7 @@ const projectsModule = require('./projects');
 const PORT = process.env.PORT || 3000;
 const LEGACY_INVITE = '__legacy__';
 let BOT_COUNT = 0; // bots auto-spawned per session (0 to disable)
-let BOT_VIEW_MODE = 'random'; // 'random', '2d', '3d' — forced view mode for bots
+let BOT_VIEW_MODE = 'random'; // 'random', '2d', '3d', 'panorama' — forced view mode for bots
 let BOT_REJOIN = true; // whether bots disconnect after session time and reconnect
 let BOT_MOBILE_MODE = 'all'; // 'all' (every bot is mobile) or 'random' (50/50 mobile/desktop). Mirror bots are always mobile.
 
@@ -46,7 +46,7 @@ const server = http.createServer((req, res) => {
 
   // GET /bots?count=2 — spawn bots in all active sessions
   // GET /bots?count=0 — disable bots (new sessions won't get bots)
-  // GET /bots?mode=2d|3d|random — force bot view mode
+  // GET /bots?mode=2d|3d|panorama|random — force bot view mode
   // GET /bots?mobile=all|random — toggle bot mobile flag (all=every bot mobile, random=50/50). Mirror bots always mobile.
   // GET /bots?rejoin=0|1 — toggle disconnect/reconnect cycle (0 keeps bots online forever)
   // GET /bots?sessionMin=N&sessionMax=N — bot session duration in seconds (online time)
@@ -72,7 +72,7 @@ const server = http.createServer((req, res) => {
       }
       log('Bots', `Bot count set to ${BOT_COUNT}`);
     }
-    if (mode !== null && ['2d', '3d', 'random'].includes(mode)) {
+    if (mode !== null && ['2d', '3d', 'panorama', 'random'].includes(mode)) {
       BOT_VIEW_MODE = mode;
       log('Bots', `Bot view mode set to ${BOT_VIEW_MODE}`);
     }
