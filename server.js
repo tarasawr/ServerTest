@@ -1,5 +1,6 @@
 const http = require('http');
 const WebSocket = require('ws');
+const crypto = require('crypto'); // DEBUG_STATE_VERIFIER
 const projectsModule = require('./projects');
 
 const PORT = process.env.PORT || 3000;
@@ -1014,7 +1015,26 @@ function handleUpdateState(ws, client, msg) {
   session.projectXml = msg.projectXml || session.projectXml;
   projectsModule.onXmlUpdated(session.projectId, session.projectXml);
   log('Session', `${session.id} state updated by player=${client.playerId} (xml: ${xmlLen} chars, seq: ${session.sequenceNumber})`);
+  broadcastStateChecksum(session); // DEBUG_STATE_VERIFIER
 }
+
+// region: DEBUG_STATE_VERIFIER
+function broadcastStateChecksum(session) {
+  const xml = session.projectXml || '';
+  const hash = crypto.createHash('md5').update(xml).digest('hex');
+  const payload = { type: 'StateChecksum', hash, length: xml.length, seq: session.sequenceNumber };
+  const n = broadcastToSession(session, null, payload);
+  log('Verify', `checksum broadcast hash=${hash.slice(0, 8)} len=${xml.length} seq=${session.sequenceNumber} → ${n} clients`);
+}
+
+function handleRequestFullState(ws, client, msg) {
+  const session = getSession(ws, client, false);
+  if (!session) return;
+  const xml = session.projectXml || '';
+  send(ws, { type: 'FullStateResponse', projectXml: xml });
+  log('Verify', `full state sent to player=${client.playerId} (${xml.length} chars)`);
+}
+// endregion: DEBUG_STATE_VERIFIER
 
 // --- Chunk assembly per connection ---
 const chunkBuffers = new Map(); // ws → Map<messageId, { chunks: string[], received: number, total: number }>
@@ -1121,6 +1141,7 @@ wss.on('connection', (ws) => {
       case 'DomainChange':  handleDomainChange(ws, client, msg); break;
       case 'DomainSelection': handleDomainSelection(ws, client, msg); break;
       case 'UpdateState':   handleUpdateState(ws, client, msg); break;
+      case 'RequestFullState': handleRequestFullState(ws, client, msg); break; // DEBUG_STATE_VERIFIER
       case 'Ping': send(ws, { type: 'Pong' }); break;
       default:
         log('Warn', `Player ${client.playerId} sent unknown type: "${msg.type}"`);
