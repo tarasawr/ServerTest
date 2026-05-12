@@ -2,54 +2,86 @@
 
 const fs = require('fs');
 const path = require('path');
+const db = require('./db');
 
 const THUMBNAILS_DIR = path.join(__dirname, 'thumbnails');
 if (!fs.existsSync(THUMBNAILS_DIR)) fs.mkdirSync(THUMBNAILS_DIR);
 
 // --- Projects database ---
-// projectId → {
-//   projectId, ownerUserId, ownerName,
-//   projectXml, lastSyncDate,
-//   globalRole: 'can_view' | 'can_edit',    ← project-level default for all users
-//   users: Map<userId, { userId, name, avatarUrl, role, isGuest }>
-//   role: 'owner' | 'can_edit' | 'can_view' | null
-//   null role means "inherit from project globalRole"
-// }
+// Persisted in Postgres (Neon). Schema in db.js:
+//   projects(project_id, owner_user_id, owner_name, project_title, project_xml,
+//            global_role, last_sync_date)
+//   project_users(project_id, user_id, name, avatar_url, role, is_guest, created_at)
+//
+// `role` is NULL when a user inherits the project-level global_role.
+// 'owner' / 'can_edit' / 'can_view' are explicit overrides.
 
-const projects = new Map();
+// --- One-shot migration from legacy JSON storage ---
 
-// --- Persistence ---
+const LEGACY_STORAGE_FILE = path.join(__dirname, 'projects-data.json');
 
-const STORAGE_FILE = path.join(__dirname, 'projects-data.json');
+async function migrateFromJsonIfNeeded() {
+  if (!fs.existsSync(LEGACY_STORAGE_FILE)) return;
 
-function saveToFile() {
-  try {
-    const arr = [];
-    for (const [, p] of projects) {
-      arr.push({ ...p, users: Array.from(p.users.values()) });
-    }
-    fs.writeFileSync(STORAGE_FILE, JSON.stringify(arr, null, 2));
-  } catch (e) {
-    log('Storage', `WARN: save failed: ${e.message}`);
+  // Don't import if DB already has data — assume someone already migrated.
+  const { rows } = await db.query('SELECT COUNT(*)::int AS n FROM projects');
+  if (rows[0].n > 0) {
+    log('Migration', `Skipping JSON import — DB has ${rows[0].n} project(s)`);
+    return;
   }
+
+  let arr;
+  try {
+    arr = JSON.parse(fs.readFileSync(LEGACY_STORAGE_FILE, 'utf8'));
+  } catch (e) {
+    log('Migration', `WARN: could not parse legacy JSON: ${e.message}`);
+    return;
+  }
+  if (!Array.isArray(arr) || arr.length === 0) return;
+
+  for (const p of arr) {
+    if (!p.projectId || !p.ownerUserId) continue;
+    try {
+      await db.transaction(async client => {
+        await client.query(
+          `INSERT INTO projects (project_id, owner_user_id, owner_name, project_title,
+                                 project_xml, global_role, last_sync_date)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           ON CONFLICT (project_id) DO NOTHING`,
+          [p.projectId, p.ownerUserId, p.ownerName || 'Unknown',
+           p.projectTitle || '', p.projectXml || '',
+           p.globalRole || 'can_view',
+           p.lastSyncDate ? new Date(p.lastSyncDate) : new Date()]
+        );
+        for (const u of (p.users || [])) {
+          if (!u.userId) continue;
+          await client.query(
+            `INSERT INTO project_users (project_id, user_id, name, avatar_url, role, is_guest)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (project_id, user_id) DO NOTHING`,
+            [p.projectId, u.userId, u.name || 'Unknown', u.avatarUrl || '',
+             u.role === undefined ? null : u.role, !!u.isGuest]
+          );
+        }
+      });
+    } catch (e) {
+      log('Migration', `WARN: failed to import project ${p.projectId}: ${e.message}`);
+    }
+  }
+
+  // Rename legacy file so we don't re-import on next restart.
+  try {
+    fs.renameSync(LEGACY_STORAGE_FILE, LEGACY_STORAGE_FILE + '.migrated-' + Date.now());
+  } catch (_) { /* keep going — migration succeeded even if rename failed */ }
+
+  log('Migration', `Imported ${arr.length} project(s) from legacy JSON`);
 }
 
-function loadFromFile() {
-  try {
-    if (!fs.existsSync(STORAGE_FILE)) return;
-    const arr = JSON.parse(fs.readFileSync(STORAGE_FILE, 'utf8'));
-    for (const p of arr) {
-      const users = new Map();
-      for (const u of (p.users || [])) users.set(u.userId, u);
-      projects.set(p.projectId, { ...p, users });
-    }
-    log('Storage', `Loaded ${projects.size} project(s) from disk`);
-  } catch (e) {
-    log('Storage', `WARN: load failed: ${e.message}`);
-  }
-}
-
-loadFromFile();
+// Kick off migration after schema is ready. Don't block the module load —
+// individual handlers wait on db.ready() via db.query().
+db.ready().then(migrateFromJsonIfNeeded).catch(e => {
+  log('Migration', `WARN: migration check failed: ${e.message}`);
+});
 
 // --- Helpers ---
 
@@ -82,53 +114,90 @@ function readBody(req) {
   });
 }
 
-// Returns the effective role for a user: individual role if set, otherwise project globalRole.
-// Owner always returns 'owner'.
-function getEffectiveRole(proj, userId) {
-  const user = proj.users.get(userId);
-  if (!user) return proj.globalRole;
-  if (user.role === 'owner') return 'owner';
-  return user.role !== null ? user.role : proj.globalRole;
+function isoDate(d) {
+  return d instanceof Date ? d.toISOString() : (d || '');
+}
+
+// --- DB helpers ---
+
+async function getProjectRow(projectId, client) {
+  const q = (client || db);
+  const r = await q.query('SELECT * FROM projects WHERE project_id = $1', [projectId]);
+  return r.rows[0] || null;
+}
+
+async function getProjectUserRow(projectId, userId, client) {
+  const q = (client || db);
+  const r = await q.query(
+    'SELECT * FROM project_users WHERE project_id = $1 AND user_id = $2',
+    [projectId, userId]
+  );
+  return r.rows[0] || null;
+}
+
+// Effective role: 'owner' if user.role == 'owner', else user.role (if set), else project.global_role.
+// `userRow` may be null (user not in project) → falls back to global_role.
+function getEffectiveRole(projRow, userRow) {
+  if (!userRow) return projRow.global_role;
+  if (userRow.role === 'owner') return 'owner';
+  return userRow.role !== null && userRow.role !== undefined ? userRow.role : projRow.global_role;
 }
 
 // Pushes a RoleChanged message to every player currently in any session linked to this project.
 // Also synchronizes session.players[*].role so the server-side canEdit() gate uses the fresh role.
-// userId may be '' for a global-role change (applies to all guests whose effective role inherits global).
-function broadcastRoleChanged(sessions, projectId, userId, newRole) {
+// `userId === ''` means a global-role change — applies to all guests whose effective role inherits global.
+async function broadcastRoleChanged(sessions, projectId, userId, newRole) {
   if (!sessions) return;
-  const proj = projects.get(projectId);
+
   const wireRole = (newRole === 'can_edit') ? 'editor' : 'viewer';
   const msg = JSON.stringify({ type: 'RoleChanged', projectId, userId: userId || '', newRole });
+
+  // For a global change we need the set of users whose stored role is NULL
+  // (= inherits global). For a per-user change we only target that one userId.
+  let inheritingIds = null;
+  if (!userId) {
+    try {
+      const r = await db.query(
+        'SELECT user_id FROM project_users WHERE project_id = $1 AND role IS NULL',
+        [projectId]
+      );
+      inheritingIds = new Set(r.rows.map(row => row.user_id));
+    } catch (e) {
+      log('Projects', `WARN: broadcastRoleChanged user lookup failed: ${e.message}`);
+      inheritingIds = new Set();
+    }
+  }
+
   for (const [, s] of sessions) {
     if (s.projectId !== projectId) continue;
     for (const [, p] of s.players) {
       if (p.role !== 'owner') {
-        // Per-user broadcast: only the targeted user.
-        // Global broadcast: all session players whose stored DB role is null (= inherits global).
         const isTarget = userId
           ? p.userId === userId
-          : (p.userId && proj && proj.users.has(p.userId) && proj.users.get(p.userId).role === null);
+          : (p.userId && inheritingIds.has(p.userId));
         if (isTarget) p.role = wireRole;
       }
       if (p.ws && p.ws.readyState === 1 /* OPEN */) {
-        try { p.ws.send(msg); } catch (_) {}
+        try { p.ws.send(msg); } catch (_) { /* peer disconnected mid-broadcast */ }
       }
     }
   }
 }
 
-function serializeUsers(usersMap, proj) {
-  const list = [];
-  for (const [, u] of usersMap) {
-    list.push({
-      userId: u.userId,
-      name: u.name,
-      avatarUrl: u.avatarUrl,
-      role: getEffectiveRole(proj, u.userId),  // always non-null effective role
-      isGuest: u.isGuest
-    });
-  }
-  return list;
+async function serializeUsers(projectId, projRow) {
+  const r = await db.query(
+    `SELECT user_id, name, avatar_url, role, is_guest
+     FROM project_users WHERE project_id = $1
+     ORDER BY created_at`,
+    [projectId]
+  );
+  return r.rows.map(u => ({
+    userId: u.user_id,
+    name: u.name,
+    avatarUrl: u.avatar_url,
+    role: getEffectiveRole(projRow, u),
+    isGuest: u.is_guest
+  }));
 }
 
 // --- Route handlers ---
@@ -141,144 +210,193 @@ async function handlePostProjects(req, res) {
     return jsonErr(res, 400, 'projectId and ownerUserId are required');
   }
 
-  if (projects.has(projectId)) {
-    // Re-registration: update owner info and XML (idempotent)
-    const p = projects.get(projectId);
-    if (projectXml) p.projectXml = projectXml;
-    if (projectTitle) p.projectTitle = projectTitle;
-    p.lastSyncDate = new Date().toISOString();
-    // Backward compat: entries created before globalRole was introduced lack the field.
-    // JSON.stringify silently omits undefined fields, which breaks client parsing.
-    if (p.globalRole === undefined) p.globalRole = 'can_view';
-    // Update owner avatar URL if provided
-    if (ownerAvatarUrl && p.users && p.users.has(ownerUserId)) {
-      p.users.get(ownerUserId).avatarUrl = ownerAvatarUrl;
+  try {
+    const existing = await getProjectRow(projectId);
+
+    if (existing) {
+      // Re-registration: idempotent update of xml/title/syncDate, owner stays as-is.
+      const updates = [];
+      const params = [];
+      let i = 1;
+      if (typeof projectXml === 'string') {
+        updates.push(`project_xml = $${i++}`);
+        params.push(projectXml);
+      }
+      if (typeof projectTitle === 'string' && projectTitle !== '') {
+        updates.push(`project_title = $${i++}`);
+        params.push(projectTitle);
+      }
+      updates.push(`last_sync_date = NOW()`);
+      params.push(projectId);
+      await db.query(
+        `UPDATE projects SET ${updates.join(', ')} WHERE project_id = $${i}`,
+        params
+      );
+
+      if (ownerAvatarUrl) {
+        await db.query(
+          `UPDATE project_users SET avatar_url = $1
+           WHERE project_id = $2 AND user_id = $3`,
+          [ownerAvatarUrl, projectId, ownerUserId]
+        );
+      }
+
+      log('Projects', `Re-registered project ${projectId} by owner ${ownerUserId}`);
+      return jsonOk(res, { ok: true, projectId, shareUrl: `/projects/${projectId}` });
     }
-    log('Projects', `Re-registered project ${projectId} by owner ${ownerUserId}`);
-    saveToFile();
-    return jsonOk(res, { ok: true, projectId, shareUrl: `/projects/${projectId}` });
+
+    // New project: insert project row + owner user atomically.
+    await db.transaction(async client => {
+      await client.query(
+        `INSERT INTO projects (project_id, owner_user_id, owner_name, project_title,
+                               project_xml, global_role)
+         VALUES ($1, $2, $3, $4, $5, 'can_view')`,
+        [projectId, ownerUserId, ownerName || 'Unknown',
+         projectTitle || '', projectXml || '']
+      );
+      await client.query(
+        `INSERT INTO project_users (project_id, user_id, name, avatar_url, role, is_guest)
+         VALUES ($1, $2, $3, $4, 'owner', false)`,
+        [projectId, ownerUserId, ownerName || 'Unknown', ownerAvatarUrl || '']
+      );
+    });
+
+    log('Projects', `Registered project ${projectId} by owner ${ownerUserId}`);
+    jsonOk(res, { ok: true, projectId, shareUrl: `/projects/${projectId}` });
+  } catch (e) {
+    log('Projects', `ERROR handlePostProjects: ${e.message}`);
+    jsonErr(res, 500, 'Internal error');
   }
-
-  const owner = { userId: ownerUserId, name: ownerName || 'Unknown', avatarUrl: ownerAvatarUrl || '', role: 'owner', isGuest: false };
-  const users = new Map([[ownerUserId, owner]]);
-  projects.set(projectId, {
-    projectId,
-    ownerUserId,
-    ownerName: ownerName || 'Unknown',
-    projectTitle: projectTitle || '',
-    projectXml: projectXml || '',
-    lastSyncDate: new Date().toISOString(),
-    globalRole: 'can_view',
-    users
-  });
-
-  log('Projects', `Registered project ${projectId} by owner ${ownerUserId}`);
-  saveToFile();
-  jsonOk(res, { ok: true, projectId, shareUrl: `/projects/${projectId}` });
 }
 
 async function handleJoinProject(req, res, projectId) {
-  if (!projects.has(projectId)) {
-    return jsonErr(res, 404, `Project ${projectId} not found`);
-  }
+  try {
+    const projRow = await getProjectRow(projectId);
+    if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
 
-  const body = await readBody(req);
-  const { userId, name, avatarUrl, isGuest } = body;
+    const body = await readBody(req);
+    const { userId, name, avatarUrl, isGuest } = body;
 
-  if (!userId) {
-    return jsonErr(res, 400, 'userId is required');
-  }
+    if (!userId) return jsonErr(res, 400, 'userId is required');
 
-  const proj = projects.get(projectId);
-
-  // Already in project → return effective role
-  if (proj.users.has(userId)) {
-    const effectiveRole = getEffectiveRole(proj, userId);
-    log('Projects', `User ${userId} already in project ${projectId} (role: ${effectiveRole})`);
-    return jsonOk(res, { ok: true, role: effectiveRole, alreadyMember: true });
-  }
-
-  const user = {
-    userId,
-    name: name || (isGuest ? 'Guest' : 'Unknown'),
-    avatarUrl: avatarUrl || '',
-    role: null,   // inherits project globalRole
-    isGuest: !!isGuest
-  };
-  proj.users.set(userId, user);
-
-  log('Projects', `User ${userId} (${user.name}) joined project ${projectId} (inherits globalRole: ${proj.globalRole})`);
-  saveToFile();
-  jsonOk(res, { ok: true, role: proj.globalRole });
-}
-
-function handleGetProject(res, projectId) {
-  if (!projects.has(projectId)) {
-    return jsonErr(res, 404, `Project ${projectId} not found`);
-  }
-  const p = projects.get(projectId);
-  jsonOk(res, {
-    projectId: p.projectId,
-    ownerUserId: p.ownerUserId,
-    ownerName: p.ownerName,
-    lastSyncDate: p.lastSyncDate,
-    globalRole: p.globalRole || 'can_view',  // fallback for entries without globalRole
-    userCount: p.users.size
-  });
-}
-
-function handleGetProjectUsers(res, projectId) {
-  if (!projects.has(projectId)) {
-    return jsonErr(res, 404, `Project ${projectId} not found`);
-  }
-  const proj = projects.get(projectId);
-  jsonOk(res, {
-    globalRole: proj.globalRole,
-    users: serializeUsers(proj.users, proj)
-  });
-}
-
-function handleGetUserRole(res, projectId, userId) {
-  if (!projects.has(projectId)) {
-    return jsonErr(res, 404, `Project ${projectId} not found`);
-  }
-  const proj = projects.get(projectId);
-  if (!proj.users.has(userId)) {
-    return jsonErr(res, 404, `User ${userId} not in project ${projectId}`);
-  }
-  jsonOk(res, { userId, role: getEffectiveRole(proj, userId) });
-}
-
-function handleGetUserProjects(res, userId) {
-  const result = [];
-  for (const [, p] of projects) {
-    if (p.users.has(userId)) {
-      const thumbPath = path.join(THUMBNAILS_DIR, p.projectId + '.jpg');
-      result.push({
-        projectId: p.projectId,
-        ownerName: p.ownerName,
-        projectTitle: p.projectTitle || '',
-        role: getEffectiveRole(p, userId),
-        lastSyncDate: p.lastSyncDate,
-        thumbnailUrl: fs.existsSync(thumbPath) ? `/projects/${p.projectId}/thumbnail` : ''
-      });
+    const userRow = await getProjectUserRow(projectId, userId);
+    if (userRow) {
+      const effectiveRole = getEffectiveRole(projRow, userRow);
+      log('Projects', `User ${userId} already in project ${projectId} (role: ${effectiveRole})`);
+      return jsonOk(res, { ok: true, role: effectiveRole, alreadyMember: true });
     }
+
+    await db.query(
+      `INSERT INTO project_users (project_id, user_id, name, avatar_url, role, is_guest)
+       VALUES ($1, $2, $3, $4, NULL, $5)`,
+      [projectId, userId,
+       name || (isGuest ? 'Guest' : 'Unknown'),
+       avatarUrl || '', !!isGuest]
+    );
+
+    log('Projects', `User ${userId} (${name || 'Unknown'}) joined project ${projectId} (inherits globalRole: ${projRow.global_role})`);
+    jsonOk(res, { ok: true, role: projRow.global_role });
+  } catch (e) {
+    log('Projects', `ERROR handleJoinProject: ${e.message}`);
+    jsonErr(res, 500, 'Internal error');
   }
-  jsonOk(res, { projects: result });
+}
+
+async function handleGetProject(res, projectId) {
+  try {
+    const projRow = await getProjectRow(projectId);
+    if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
+
+    const { rows } = await db.query(
+      'SELECT COUNT(*)::int AS n FROM project_users WHERE project_id = $1',
+      [projectId]
+    );
+    jsonOk(res, {
+      projectId: projRow.project_id,
+      ownerUserId: projRow.owner_user_id,
+      ownerName: projRow.owner_name,
+      lastSyncDate: isoDate(projRow.last_sync_date),
+      globalRole: projRow.global_role || 'can_view',
+      userCount: rows[0].n
+    });
+  } catch (e) {
+    log('Projects', `ERROR handleGetProject: ${e.message}`);
+    jsonErr(res, 500, 'Internal error');
+  }
+}
+
+async function handleGetProjectUsers(res, projectId) {
+  try {
+    const projRow = await getProjectRow(projectId);
+    if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
+
+    const users = await serializeUsers(projectId, projRow);
+    jsonOk(res, { globalRole: projRow.global_role, users });
+  } catch (e) {
+    log('Projects', `ERROR handleGetProjectUsers: ${e.message}`);
+    jsonErr(res, 500, 'Internal error');
+  }
+}
+
+async function handleGetUserRole(res, projectId, userId) {
+  try {
+    const projRow = await getProjectRow(projectId);
+    if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
+
+    const userRow = await getProjectUserRow(projectId, userId);
+    if (!userRow) return jsonErr(res, 404, `User ${userId} not in project ${projectId}`);
+
+    jsonOk(res, { userId, role: getEffectiveRole(projRow, userRow) });
+  } catch (e) {
+    log('Projects', `ERROR handleGetUserRole: ${e.message}`);
+    jsonErr(res, 500, 'Internal error');
+  }
+}
+
+async function handleGetUserProjects(res, userId) {
+  try {
+    const { rows } = await db.query(
+      `SELECT p.project_id, p.owner_name, p.project_title, p.global_role,
+              p.last_sync_date, pu.role AS user_role
+       FROM projects p
+       JOIN project_users pu ON pu.project_id = p.project_id
+       WHERE pu.user_id = $1
+       ORDER BY p.last_sync_date DESC`,
+      [userId]
+    );
+
+    const result = rows.map(p => {
+      const thumbPath = path.join(THUMBNAILS_DIR, p.project_id + '.jpg');
+      const role = p.user_role === 'owner'
+        ? 'owner'
+        : (p.user_role !== null && p.user_role !== undefined ? p.user_role : p.global_role);
+      return {
+        projectId: p.project_id,
+        ownerName: p.owner_name,
+        projectTitle: p.project_title || '',
+        role,
+        lastSyncDate: isoDate(p.last_sync_date),
+        thumbnailUrl: fs.existsSync(thumbPath) ? `/projects/${p.project_id}/thumbnail` : ''
+      };
+    });
+
+    jsonOk(res, { projects: result });
+  } catch (e) {
+    log('Projects', `ERROR handleGetUserProjects: ${e.message}`);
+    jsonErr(res, 500, 'Internal error');
+  }
 }
 
 async function handlePutThumbnail(req, res, projectId) {
-  if (!projects.has(projectId)) {
-    return jsonErr(res, 404, `Project ${projectId} not found`);
-  }
+  const projRow = await getProjectRow(projectId).catch(() => null);
+  if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
 
   const chunks = [];
   req.on('data', chunk => chunks.push(chunk));
   req.on('end', () => {
     const bytes = Buffer.concat(chunks);
-    if (bytes.length === 0) {
-      return jsonErr(res, 400, 'Empty thumbnail');
-    }
+    if (bytes.length === 0) return jsonErr(res, 400, 'Empty thumbnail');
+
     try {
       fs.writeFileSync(path.join(THUMBNAILS_DIR, projectId + '.jpg'), bytes);
       log('Projects', `Thumbnail saved for project ${projectId} (${bytes.length} bytes)`);
@@ -292,9 +410,7 @@ async function handlePutThumbnail(req, res, projectId) {
 
 function handleGetThumbnail(res, projectId) {
   const thumbPath = path.join(THUMBNAILS_DIR, projectId + '.jpg');
-  if (!fs.existsSync(thumbPath)) {
-    return jsonErr(res, 404, 'Thumbnail not found');
-  }
+  if (!fs.existsSync(thumbPath)) return jsonErr(res, 404, 'Thumbnail not found');
   try {
     const bytes = fs.readFileSync(thumbPath);
     res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': bytes.length });
@@ -305,282 +421,322 @@ function handleGetThumbnail(res, projectId) {
 }
 
 async function handlePutUserRole(req, res, projectId, userId, sessions) {
-  if (!projects.has(projectId)) {
-    return jsonErr(res, 404, `Project ${projectId} not found`);
-  }
-  const proj = projects.get(projectId);
-  if (!proj.users.has(userId)) {
-    return jsonErr(res, 404, `User ${userId} not in project ${projectId}`);
-  }
-  if (userId === proj.ownerUserId) {
-    return jsonErr(res, 400, 'Cannot change the owner\'s role');
-  }
+  try {
+    const projRow = await getProjectRow(projectId);
+    if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
 
-  const body = await readBody(req);
-  const { role } = body;
-  if (!['can_view', 'can_edit'].includes(role)) {
-    return jsonErr(res, 400, 'role must be can_view or can_edit');
+    const userRow = await getProjectUserRow(projectId, userId);
+    if (!userRow) return jsonErr(res, 404, `User ${userId} not in project ${projectId}`);
+
+    if (userId === projRow.owner_user_id) {
+      return jsonErr(res, 400, "Cannot change the owner's role");
+    }
+
+    const body = await readBody(req);
+    const { role } = body;
+    if (!['can_view', 'can_edit'].includes(role)) {
+      return jsonErr(res, 400, 'role must be can_view or can_edit');
+    }
+
+    await db.query(
+      'UPDATE project_users SET role = $1 WHERE project_id = $2 AND user_id = $3',
+      [role, projectId, userId]
+    );
+    log('Projects', `Role of user ${userId} in project ${projectId} changed to ${role}`);
+
+    await broadcastRoleChanged(sessions, projectId, userId, role);
+
+    jsonOk(res, { ok: true, role });
+  } catch (e) {
+    log('Projects', `ERROR handlePutUserRole: ${e.message}`);
+    jsonErr(res, 500, 'Internal error');
   }
-
-  proj.users.get(userId).role = role;
-  log('Projects', `Role of user ${userId} in project ${projectId} changed to ${role}`);
-  saveToFile();
-
-  broadcastRoleChanged(sessions, projectId, userId, role);
-
-  jsonOk(res, { ok: true, role });
 }
 
 async function handlePutProjectGlobalRole(req, res, projectId, sessions) {
-  if (!projects.has(projectId)) {
-    return jsonErr(res, 404, `Project ${projectId} not found`);
+  try {
+    const projRow = await getProjectRow(projectId);
+    if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
+
+    const body = await readBody(req);
+    const { globalRole, ownerUserId } = body;
+
+    if (ownerUserId !== projRow.owner_user_id) {
+      return jsonErr(res, 403, 'Only the owner can change the project global role');
+    }
+    if (!['can_view', 'can_edit'].includes(globalRole)) {
+      return jsonErr(res, 400, 'globalRole must be can_view or can_edit');
+    }
+
+    await db.query(
+      'UPDATE projects SET global_role = $1 WHERE project_id = $2',
+      [globalRole, projectId]
+    );
+    log('Projects', `Global role of project ${projectId} changed to ${globalRole} by owner ${ownerUserId}`);
+
+    // userId === '' = global role change applies to everyone whose effective role is 'global'.
+    // Per-user role overrides are NOT rewritten — they keep their explicit assignment.
+    await broadcastRoleChanged(sessions, projectId, '', globalRole);
+
+    jsonOk(res, { ok: true, globalRole });
+  } catch (e) {
+    log('Projects', `ERROR handlePutProjectGlobalRole: ${e.message}`);
+    jsonErr(res, 500, 'Internal error');
   }
-  const proj = projects.get(projectId);
-
-  const body = await readBody(req);
-  const { globalRole, ownerUserId } = body;
-
-  if (ownerUserId !== proj.ownerUserId) {
-    return jsonErr(res, 403, 'Only the owner can change the project global role');
-  }
-  if (!['can_view', 'can_edit'].includes(globalRole)) {
-    return jsonErr(res, 400, 'globalRole must be can_view or can_edit');
-  }
-
-  proj.globalRole = globalRole;
-  log('Projects', `Global role of project ${projectId} changed to ${globalRole} by owner ${ownerUserId}`);
-  saveToFile();
-
-  // userId === '' means "global role change applies to everyone whose effective role is 'global'".
-  // Per-user role overrides are NOT rewritten — they keep their explicit assignment.
-  broadcastRoleChanged(sessions, projectId, '', globalRole);
-
-  jsonOk(res, { ok: true, globalRole });
 }
 
 async function handlePutSync(req, res, projectId) {
-  if (!projects.has(projectId)) {
-    return jsonErr(res, 404, `Project ${projectId} not found`);
+  try {
+    const r = await db.query(
+      'UPDATE projects SET last_sync_date = NOW() WHERE project_id = $1 RETURNING last_sync_date',
+      [projectId]
+    );
+    if (r.rowCount === 0) return jsonErr(res, 404, `Project ${projectId} not found`);
+
+    const lastSyncDate = isoDate(r.rows[0].last_sync_date);
+    log('Projects', `Sync date updated for project ${projectId}`);
+    jsonOk(res, { ok: true, lastSyncDate });
+  } catch (e) {
+    log('Projects', `ERROR handlePutSync: ${e.message}`);
+    jsonErr(res, 500, 'Internal error');
   }
-  const lastSyncDate = new Date().toISOString();
-  projects.get(projectId).lastSyncDate = lastSyncDate;
-  log('Projects', `Sync date updated for project ${projectId}`);
-  saveToFile();
-  jsonOk(res, { ok: true, lastSyncDate });
 }
 
 async function handleDeleteAllUsers(req, res, projectId) {
-  if (!projects.has(projectId)) {
-    return jsonErr(res, 404, `Project ${projectId} not found`);
-  }
-  const proj = projects.get(projectId);
+  try {
+    const projRow = await getProjectRow(projectId);
+    if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
 
-  const body = await readBody(req);
-  const { ownerUserId } = body;
+    const body = await readBody(req);
+    const { ownerUserId } = body;
 
-  if (ownerUserId !== proj.ownerUserId) {
-    return jsonErr(res, 403, 'Only the owner can remove all users');
-  }
-
-  let removedCount = 0;
-  for (const [userId] of proj.users) {
-    if (userId !== proj.ownerUserId) {
-      proj.users.delete(userId);
-      removedCount++;
+    if (ownerUserId !== projRow.owner_user_id) {
+      return jsonErr(res, 403, 'Only the owner can remove all users');
     }
-  }
 
-  log('Projects', `All ${removedCount} non-owner users removed from project ${projectId} by owner`);
-  saveToFile();
-  jsonOk(res, { ok: true, removedCount });
+    const r = await db.query(
+      'DELETE FROM project_users WHERE project_id = $1 AND user_id <> $2',
+      [projectId, projRow.owner_user_id]
+    );
+
+    log('Projects', `All ${r.rowCount} non-owner users removed from project ${projectId} by owner`);
+    jsonOk(res, { ok: true, removedCount: r.rowCount });
+  } catch (e) {
+    log('Projects', `ERROR handleDeleteAllUsers: ${e.message}`);
+    jsonErr(res, 500, 'Internal error');
+  }
 }
 
 async function handleDeleteProject(req, res, projectId, sessions, projectIndex) {
-  if (!projects.has(projectId)) {
-    return jsonErr(res, 404, `Project ${projectId} not found`);
-  }
-  const proj = projects.get(projectId);
+  try {
+    const projRow = await getProjectRow(projectId);
+    if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
 
-  const body = await readBody(req);
-  const { ownerUserId } = body;
+    const body = await readBody(req);
+    const { ownerUserId } = body;
 
-  if (ownerUserId !== proj.ownerUserId) {
-    return jsonErr(res, 403, 'Only the owner can delete the project');
-  }
-
-  projects.delete(projectId);
-  log('Projects', `Project ${projectId} deleted by owner ${ownerUserId}`);
-  saveToFile();
-
-  // Terminate all active multiplayer sessions linked to this project
-  if (sessions) {
-    // Wire format must be PascalCase to match the Unity-side MessageType enum (case-sensitive Enum.TryParse).
-    const closedMsg = JSON.stringify({ type: 'SessionClosed', reason: 'sharing_stopped' });
-    for (const [inviteCode, s] of sessions) {
-      if (s.projectId !== projectId) continue;
-      for (const [, player] of s.players) {
-        if (player.ws && player.ws.readyState === 1 /* OPEN */) {
-          try { player.ws.send(closedMsg); } catch (_) {}
-          player.ws.close();
-        }
-      }
-      sessions.delete(inviteCode);
-      if (projectIndex && s.projectId) projectIndex.delete(s.projectId);
-      log('Projects', `Session ${inviteCode} terminated (project ${projectId} sharing stopped)`);
+    if (ownerUserId !== projRow.owner_user_id) {
+      return jsonErr(res, 403, 'Only the owner can delete the project');
     }
-  }
 
-  jsonOk(res, { ok: true });
+    // ON DELETE CASCADE on project_users.project_id removes user rows automatically.
+    await db.query('DELETE FROM projects WHERE project_id = $1', [projectId]);
+    log('Projects', `Project ${projectId} deleted by owner ${ownerUserId}`);
+
+    // Terminate all active multiplayer sessions linked to this project.
+    if (sessions) {
+      // Wire format is PascalCase to match Unity-side MessageType (case-sensitive Enum.TryParse).
+      const closedMsg = JSON.stringify({ type: 'SessionClosed', reason: 'sharing_stopped' });
+      for (const [inviteCode, s] of sessions) {
+        if (s.projectId !== projectId) continue;
+        for (const [, player] of s.players) {
+          if (player.ws && player.ws.readyState === 1 /* OPEN */) {
+            try { player.ws.send(closedMsg); } catch (_) { /* peer disconnected */ }
+            player.ws.close();
+          }
+        }
+        sessions.delete(inviteCode);
+        if (projectIndex && s.projectId) projectIndex.delete(s.projectId);
+        log('Projects', `Session ${inviteCode} terminated (project ${projectId} sharing stopped)`);
+      }
+    }
+
+    jsonOk(res, { ok: true });
+  } catch (e) {
+    log('Projects', `ERROR handleDeleteProject: ${e.message}`);
+    jsonErr(res, 500, 'Internal error');
+  }
 }
 
 async function handleDeleteUser(req, res, projectId, userId, sessions) {
-  if (!projects.has(projectId)) {
-    return jsonErr(res, 404, `Project ${projectId} not found`);
-  }
-  const proj = projects.get(projectId);
+  try {
+    const projRow = await getProjectRow(projectId);
+    if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
 
-  const body = await readBody(req);
-  const { ownerUserId } = body;
+    const body = await readBody(req);
+    const { ownerUserId } = body;
 
-  if (ownerUserId !== proj.ownerUserId) {
-    return jsonErr(res, 403, 'Only the owner can remove users');
-  }
-  if (userId === proj.ownerUserId) {
-    return jsonErr(res, 400, 'Cannot remove the owner');
-  }
-  if (!proj.users.has(userId)) {
-    return jsonErr(res, 404, `User ${userId} not in project ${projectId}`);
-  }
+    if (ownerUserId !== projRow.owner_user_id) {
+      return jsonErr(res, 403, 'Only the owner can remove users');
+    }
+    if (userId === projRow.owner_user_id) {
+      return jsonErr(res, 400, 'Cannot remove the owner');
+    }
 
-  proj.users.delete(userId);
-  log('Projects', `User ${userId} removed from project ${projectId} by owner`);
-  saveToFile();
+    const r = await db.query(
+      'DELETE FROM project_users WHERE project_id = $1 AND user_id = $2',
+      [projectId, userId]
+    );
+    if (r.rowCount === 0) return jsonErr(res, 404, `User ${userId} not in project ${projectId}`);
 
-  // Notify the kicked player (if currently in a session linked to this project) and force-close their WS.
-  // The server's existing leaveSession/close handler will broadcast PlayerLeft (or OwnerChanged if the kicked
-  // user was the session host) — we intentionally do NOT manually transfer ownership to avoid double-fire.
-  if (sessions) {
-    const kickMsg = JSON.stringify({ type: 'UserRemoved', projectId, userId });
-    for (const [, s] of sessions) {
-      if (s.projectId !== projectId) continue;
-      for (const [, p] of s.players) {
-        if (p.userId !== userId) continue;
-        if (p.ws && p.ws.readyState === 1 /* OPEN */) {
-          try { p.ws.send(kickMsg); } catch (_) {}
-          try { p.ws.close(); } catch (_) {}
+    log('Projects', `User ${userId} removed from project ${projectId} by owner`);
+
+    // Notify the kicked player (if currently in a session linked to this project) and force-close their WS.
+    // server.js leaveSession() handles ownership transfer + PlayerLeft broadcast.
+    if (sessions) {
+      const kickMsg = JSON.stringify({ type: 'UserRemoved', projectId, userId });
+      for (const [, s] of sessions) {
+        if (s.projectId !== projectId) continue;
+        for (const [, p] of s.players) {
+          if (p.userId !== userId) continue;
+          if (p.ws && p.ws.readyState === 1 /* OPEN */) {
+            try { p.ws.send(kickMsg); } catch (_) { /* peer disconnected */ }
+            try { p.ws.close(); } catch (_) { /* socket already closing */ }
+          }
         }
       }
     }
-  }
 
-  jsonOk(res, { ok: true });
+    jsonOk(res, { ok: true });
+  } catch (e) {
+    log('Projects', `ERROR handleDeleteUser: ${e.message}`);
+    jsonErr(res, 500, 'Internal error');
+  }
 }
 
 async function handleLeaveProject(req, res, projectId) {
-  if (!projects.has(projectId)) {
-    return jsonErr(res, 404, `Project ${projectId} not found`);
-  }
-  const proj = projects.get(projectId);
+  try {
+    const projRow = await getProjectRow(projectId);
+    if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
 
-  const body = await readBody(req);
-  const { userId } = body;
+    const body = await readBody(req);
+    const { userId } = body;
 
-  if (!userId) {
-    return jsonErr(res, 400, 'userId is required');
-  }
-  if (userId === proj.ownerUserId) {
-    return jsonErr(res, 400, 'Owner cannot leave the project');
-  }
-  if (!proj.users.has(userId)) {
-    return jsonErr(res, 404, `User ${userId} not in project ${projectId}`);
-  }
-
-  proj.users.delete(userId);
-  log('Projects', `User ${userId} left project ${projectId}`);
-  saveToFile();
-  jsonOk(res, { ok: true });
-}
-
-function handleGetProjectXml(res, projectId) {
-  if (!projects.has(projectId)) {
-    return jsonErr(res, 404, `Project ${projectId} not found`);
-  }
-  const xml = projects.get(projectId).projectXml || '';
-  res.writeHead(200, { 'Content-Type': 'text/xml; charset=utf-8' });
-  res.end(xml);
-}
-
-function handleGetProjectSession(res, projectId, sessions) {
-  if (!projects.has(projectId)) {
-    return jsonErr(res, 404, `Project ${projectId} not found`);
-  }
-  for (const [inviteCode, s] of sessions) {
-    if (s.projectId === projectId && s.players.size > 0) {
-      return jsonOk(res, { inviteCode });
+    if (!userId) return jsonErr(res, 400, 'userId is required');
+    if (userId === projRow.owner_user_id) {
+      return jsonErr(res, 400, 'Owner cannot leave the project');
     }
+
+    const r = await db.query(
+      'DELETE FROM project_users WHERE project_id = $1 AND user_id = $2',
+      [projectId, userId]
+    );
+    if (r.rowCount === 0) return jsonErr(res, 404, `User ${userId} not in project ${projectId}`);
+
+    log('Projects', `User ${userId} left project ${projectId}`);
+    jsonOk(res, { ok: true });
+  } catch (e) {
+    log('Projects', `ERROR handleLeaveProject: ${e.message}`);
+    jsonErr(res, 500, 'Internal error');
   }
-  jsonErr(res, 404, 'No active session for this project');
+}
+
+async function handleGetProjectXml(res, projectId) {
+  try {
+    const r = await db.query(
+      'SELECT project_xml FROM projects WHERE project_id = $1',
+      [projectId]
+    );
+    if (r.rowCount === 0) return jsonErr(res, 404, `Project ${projectId} not found`);
+
+    const xml = r.rows[0].project_xml || '';
+    res.writeHead(200, { 'Content-Type': 'text/xml; charset=utf-8' });
+    res.end(xml);
+  } catch (e) {
+    log('Projects', `ERROR handleGetProjectXml: ${e.message}`);
+    jsonErr(res, 500, 'Internal error');
+  }
+}
+
+async function handleGetProjectSession(res, projectId, sessions) {
+  try {
+    const projRow = await getProjectRow(projectId);
+    if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
+
+    for (const [inviteCode, s] of sessions) {
+      if (s.projectId === projectId && s.players.size > 0) {
+        return jsonOk(res, { inviteCode });
+      }
+    }
+    jsonErr(res, 404, 'No active session for this project');
+  } catch (e) {
+    log('Projects', `ERROR handleGetProjectSession: ${e.message}`);
+    jsonErr(res, 500, 'Internal error');
+  }
 }
 
 // Returns players currently online inside the multiplayer session linked to this project.
 // Distinct from /users (= everyone with access). Empty list if no active session is linked.
-function handleGetProjectActiveUsers(res, projectId, sessions) {
-  if (!projects.has(projectId)) {
-    return jsonErr(res, 404, `Project ${projectId} not found`);
-  }
-  const list = [];
-  for (const [, s] of sessions) {
-    if (s.projectId !== projectId) continue;
-    for (const [, p] of s.players) {
-      list.push({
-        userId: p.userId || '',
-        name: p.userName || '',
-        avatarUrl: p.avatarUrl || ''
-      });
+async function handleGetProjectActiveUsers(res, projectId, sessions) {
+  try {
+    const projRow = await getProjectRow(projectId);
+    if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
+
+    const list = [];
+    for (const [, s] of sessions) {
+      if (s.projectId !== projectId) continue;
+      for (const [, p] of s.players) {
+        list.push({
+          userId: p.userId || '',
+          name: p.userName || '',
+          avatarUrl: p.avatarUrl || ''
+        });
+      }
     }
+    jsonOk(res, { users: list });
+  } catch (e) {
+    log('Projects', `ERROR handleGetProjectActiveUsers: ${e.message}`);
+    jsonErr(res, 500, 'Internal error');
   }
-  jsonOk(res, { users: list });
 }
 
 async function handleLinkSession(req, res, inviteCode, sessions, projectIndex) {
-  const body = await readBody(req);
-  const { projectId } = body;
+  try {
+    const body = await readBody(req);
+    const { projectId } = body;
 
-  if (!projectId) {
-    return jsonErr(res, 400, 'projectId is required');
-  }
-  if (!projects.has(projectId)) {
-    return jsonErr(res, 404, `Project ${projectId} not found`);
-  }
-  if (inviteCode === '__legacy__') {
-    return jsonErr(res, 400, 'Cannot link legacy session');
-  }
+    if (!projectId) return jsonErr(res, 400, 'projectId is required');
 
-  const session = sessions.get(inviteCode);
-  if (!session) {
-    return jsonErr(res, 404, `Session ${inviteCode} not found`);
+    const projRow = await getProjectRow(projectId);
+    if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
+
+    if (inviteCode === '__legacy__') return jsonErr(res, 400, 'Cannot link legacy session');
+
+    const session = sessions.get(inviteCode);
+    if (!session) return jsonErr(res, 404, `Session ${inviteCode} not found`);
+
+    if (session.projectId === projectId) {
+      return jsonOk(res, { ok: true, alreadyLinked: true });
+    }
+    if (session.projectId && session.projectId !== projectId) {
+      return jsonErr(res, 409, 'Session already linked to another project');
+    }
+
+    // session.projectId == null → adopt the new projectId.
+    // Guard: refuse if another session is already indexed for this projectId.
+    if (projectIndex && projectIndex.has(projectId) && projectIndex.get(projectId) !== inviteCode) {
+      return jsonErr(res, 409, 'Another session is already linked to this project');
+    }
+
+    session.projectId = projectId;
+    if (projectIndex) projectIndex.set(projectId, inviteCode);
+
+    log('Projects', `Session ${inviteCode} linked to project ${projectId}`);
+    jsonOk(res, { ok: true });
+  } catch (e) {
+    log('Projects', `ERROR handleLinkSession: ${e.message}`);
+    jsonErr(res, 500, 'Internal error');
   }
-
-  if (session.projectId === projectId) {
-    return jsonOk(res, { ok: true, alreadyLinked: true });
-  }
-
-  if (session.projectId && session.projectId !== projectId) {
-    return jsonErr(res, 409, 'Session already linked to another project');
-  }
-
-  // session.projectId == null → adopt the new projectId.
-  // Guard: if another session is already indexed for this projectId, refuse —
-  // otherwise we'd silently orphan that session in the index.
-  if (projectIndex && projectIndex.has(projectId) && projectIndex.get(projectId) !== inviteCode) {
-    return jsonErr(res, 409, 'Another session is already linked to this project');
-  }
-
-  session.projectId = projectId;
-  if (projectIndex) projectIndex.set(projectId, inviteCode);
-
-  log('Projects', `Session ${inviteCode} linked to project ${projectId}`);
-  jsonOk(res, { ok: true });
 }
 
 // --- Main export ---
@@ -696,11 +852,15 @@ function handleRequest(req, res, url, sessions, projectIndex) {
   return false;
 }
 
+// Fire-and-forget XML update from session.UpdateState. The previous in-memory
+// implementation was synchronous; with Neon we accept eventual consistency —
+// errors are logged but never bubble up to the WS handler.
 function onXmlUpdated(projectId, xml) {
-  if (!projectId || !projects.has(projectId)) return;
-  const p = projects.get(projectId);
-  p.projectXml = xml;
-  p.lastSyncDate = new Date().toISOString();
+  if (!projectId) return;
+  db.query(
+    'UPDATE projects SET project_xml = $1, last_sync_date = NOW() WHERE project_id = $2',
+    [xml || '', projectId]
+  ).catch(e => log('Projects', `WARN: onXmlUpdated failed for ${projectId}: ${e.message}`));
 }
 
-module.exports = { handleRequest, onXmlUpdated, projects };
+module.exports = { handleRequest, onXmlUpdated };
