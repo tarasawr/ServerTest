@@ -389,7 +389,28 @@ function getSession(ws, client, autoJoinLegacy) {
 
 // --- Session lifecycle ---
 
-function handleCreateSession(ws, client, msg) {
+// Resolves the wire role ('owner' | 'editor' | 'viewer') for a joining player from the project DB.
+// Source of truth: projects.owner_user_id, project_users.role (per-user override), projects.global_role.
+async function resolveRoleFromDb(projectId, userId) {
+  const projRow = await projectsModule.getProjectRow(projectId);
+  if (!projRow) return { error: 'NOT_FOUND', message: `Project ${projectId} not registered` };
+
+  if (userId && userId === projRow.owner_user_id) return { role: 'owner' };
+
+  let effective;
+  if (userId) {
+    const userRow = await projectsModule.getProjectUserRow(projectId, userId);
+    effective = projectsModule.getEffectiveRole(projRow, userRow);
+  } else {
+    effective = projRow.global_role; // guest with no userId — inherits project-level role
+  }
+
+  if (effective === 'owner') return { role: 'owner' };
+  if (effective === 'can_edit') return { role: 'editor' };
+  return { role: 'viewer' };
+}
+
+async function handleCreateSession(ws, client, msg) {
   if (client.sessionId) { sendError(ws, 'ALREADY_IN_SESSION', 'Already in a session'); return; }
 
   const projectId = msg.projectId || null;
@@ -403,12 +424,6 @@ function handleCreateSession(ws, client, msg) {
       projectIndex.delete(projectId);
     } else {
       const isOwnerRejoin = msg.userId && msg.userId === existing.ownerUserId;
-
-      // linkPermission='none' bypass for the owner (so they can always rejoin their own project)
-      if (existing.linkPermission === 'none' && !isOwnerRejoin) {
-        sendError(ws, 'NO_ACCESS', 'Link disabled');
-        return;
-      }
 
       if (existing.players.size >= 25) {
         sendError(ws, 'SESSION_FULL', 'Max 25 players');
@@ -427,9 +442,22 @@ function handleCreateSession(ws, client, msg) {
     }
   }
 
+  // Resolve link permission from the project DB row (single source of truth).
+  // For sessions with no projectId (anonymous/test path) the legacy msg.linkPermission is used.
+  let linkPermission;
+  if (projectId) {
+    const projRow = await projectsModule.getProjectRow(projectId);
+    if (!projRow) {
+      sendError(ws, 'NOT_FOUND', `Project ${projectId} not registered`);
+      return;
+    }
+    linkPermission = projRow.global_role === 'can_edit' ? 'edit' : 'view';
+  } else {
+    linkPermission = msg.linkPermission || 'edit';
+  }
+
   const inviteCode = generateCode();
   const sessionId = 'sess_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-  const linkPermission = msg.linkPermission || 'edit';
 
   // Create session first (needed for pickColor)
   const session = {
@@ -470,21 +498,29 @@ function handleCreateSession(ws, client, msg) {
   setTimeout(() => spawnSessionBots(inviteCode, session.projectXml), 5000);
 }
 
-function handleJoinSession(ws, client, msg) {
+async function handleJoinSession(ws, client, msg) {
   if (client.sessionId) { sendError(ws, 'ALREADY_IN_SESSION', 'Already in a session'); return; }
 
   const session = sessions.get(msg.inviteCode);
   if (!session) { sendError(ws, 'NOT_FOUND', `Session not found: ${msg.inviteCode}`); return; }
-  const isOwnerRejoin = msg.userId && msg.userId === session.ownerUserId;
-  if (session.linkPermission === 'none' && !isOwnerRejoin) { sendError(ws, 'NO_ACCESS', 'Link disabled'); return; }
   if (session.players.size >= 25) { sendError(ws, 'SESSION_FULL', 'Max 25 players'); return; }
 
   if (msg.isBot) client.isBot = true;
   if (msg.isMirror) client.isMirror = true;
 
-  let role = session.linkPermission === 'edit' ? 'editor' : 'viewer';
-  if (msg.userId && msg.userId === session.ownerUserId) role = 'owner';
-  if (msg.isBot) role = 'editor';
+  // Resolve role from the project DB (single source of truth). Bots and DB-less sessions
+  // (anonymous/test invites) fall back to a derived rule.
+  let role;
+  if (msg.isBot) {
+    role = 'editor';
+  } else if (session.projectId) {
+    const resolved = await resolveRoleFromDb(session.projectId, msg.userId);
+    if (resolved.error) { sendError(ws, resolved.error, resolved.message); return; }
+    role = resolved.role;
+  } else {
+    role = session.linkPermission === 'edit' ? 'editor' : 'viewer';
+    if (msg.userId && msg.userId === session.ownerUserId) role = 'owner';
+  }
 
   const player = {
     playerId: client.playerId, userId: msg.userId || null,
@@ -1132,8 +1168,8 @@ wss.on('connection', (ws) => {
     }
 
     switch (msg.type) {
-      case 'CreateSession': handleCreateSession(ws, client, msg); break;
-      case 'JoinSession':   handleJoinSession(ws, client, msg); break;
+      case 'CreateSession': handleCreateSession(ws, client, msg).catch(e => log('Session', `ERROR handleCreateSession: ${e.message}`)); break;
+      case 'JoinSession':   handleJoinSession(ws, client, msg).catch(e => log('Session', `ERROR handleJoinSession: ${e.message}`)); break;
       case 'LeaveSession':  leaveSession(ws, client); break;
       case 'Move':           handleMove(ws, client, msg); break;
       case 'DomainTransform': handleDomainTransform(ws, client, msg); break;

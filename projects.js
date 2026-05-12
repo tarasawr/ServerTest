@@ -863,4 +863,7 @@ function onXmlUpdated(projectId, xml) {
   ).catch(e => log('Projects', `WARN: onXmlUpdated failed for ${projectId}: ${e.message}`));
 }
 
-module.exports = { handleRequest, onXmlUpdated };
+module.exports = {
+  handleRequest, onXmlUpdated,
+  getProjectRow, getProjectUserRow, getEffectiveRole
+};
