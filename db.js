@@ -43,10 +43,11 @@ const INIT_SQL = `
     name        TEXT        NOT NULL DEFAULT 'Unknown',
     avatar_url  TEXT        NOT NULL DEFAULT '',
     role        TEXT,        -- NULL = inherits project.global_role; 'owner' | 'can_view' | 'can_edit' otherwise
-    is_guest    BOOLEAN     NOT NULL DEFAULT FALSE,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (project_id, user_id)
   );
+
+  ALTER TABLE project_users DROP COLUMN IF EXISTS is_guest;
 
   CREATE INDEX IF NOT EXISTS project_users_user_idx ON project_users(user_id);
 `;

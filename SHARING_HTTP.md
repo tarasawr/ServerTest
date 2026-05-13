@@ -68,7 +68,6 @@
 | `userId` | да | ID пользователя |
 | `name` | нет | Отображаемое имя |
 | `avatarUrl` | нет | URL аватара |
-| `isGuest` | нет | boolean |
 
 **Успех (200):**
 
@@ -109,7 +108,7 @@
 ```json
 {
   "globalRole": "can_view",
-  "users": [ { "userId", "name", "avatarUrl", "role", "isGuest" }, ... ]
+  "users": [ { "userId", "name", "avatarUrl", "role" }, ... ]
 }
 ```
 `role` — эффективная роль каждого участника (индивидуальная или `globalRole`). Никогда не `null`.
@@ -198,6 +197,21 @@
 **Ошибки:** `404` — проект не найден или нет активной привязанной сессии.
 
 > Используется клиентом сразу после `POST /projects/:id/join`, чтобы получить `inviteCode` и автоматически подключиться к WebSocket-сессии.
+
+---
+
+### `GET /projects/:id/active-users`
+
+Список пользователей, **прямо сейчас** находящихся в активной WebSocket-сессии, привязанной к проекту (в отличие от `GET /projects/:id/users`, который возвращает всех с доступом). Если ни одна сессия не привязана к проекту или в них нет игроков — возвращается пустой список.
+
+**Успех (200):**
+```json
+{
+  "users": [ { "userId", "name", "avatarUrl" }, ... ]
+}
+```
+
+**Ошибки:** `404` — проект не найден.
 
 ---
 
@@ -291,5 +305,6 @@ XML проекта из первой активной сессии (с хотя 
 | `RemoveAllUsers` | `DELETE /projects/{id}/users` |
 | `DeleteProject` | `DELETE /projects/{id}` |
 | `GetProjectUsers` | `GET /projects/{id}/users` |
+| `GetProjectActiveUsers` | `GET /projects/{id}/active-users` |
 | `GetProjectSessionInviteCode` | `GET /projects/{id}/session` |
 | `LinkSessionToProject` | `PUT /sessions/{invite}/project` |

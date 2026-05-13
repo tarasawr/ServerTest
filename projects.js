@@ -8,7 +8,7 @@ const db = require('./db');
 // Persisted in Postgres (Neon). Schema in db.js:
 //   projects(project_id, owner_user_id, owner_name, project_title, project_xml,
 //            global_role, last_sync_date)
-//   project_users(project_id, user_id, name, avatar_url, role, is_guest, created_at)
+//   project_users(project_id, user_id, name, avatar_url, role, created_at)
 //
 // `role` is NULL when a user inherits the project-level global_role.
 // 'owner' / 'can_edit' / 'can_view' are explicit overrides.
@@ -53,11 +53,11 @@ async function migrateFromJsonIfNeeded() {
         for (const u of (p.users || [])) {
           if (!u.userId) continue;
           await client.query(
-            `INSERT INTO project_users (project_id, user_id, name, avatar_url, role, is_guest)
-             VALUES ($1, $2, $3, $4, $5, $6)
+            `INSERT INTO project_users (project_id, user_id, name, avatar_url, role)
+             VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (project_id, user_id) DO NOTHING`,
             [p.projectId, u.userId, u.name || 'Unknown', u.avatarUrl || '',
-             u.role === undefined ? null : u.role, !!u.isGuest]
+             u.role === undefined ? null : u.role]
           );
         }
       });
@@ -183,7 +183,7 @@ async function broadcastRoleChanged(sessions, projectId, userId, newRole) {
 
 async function serializeUsers(projectId, projRow) {
   const r = await db.query(
-    `SELECT user_id, name, avatar_url, role, is_guest
+    `SELECT user_id, name, avatar_url, role
      FROM project_users WHERE project_id = $1
      ORDER BY created_at`,
     [projectId]
@@ -192,8 +192,7 @@ async function serializeUsers(projectId, projRow) {
     userId: u.user_id,
     name: u.name,
     avatarUrl: u.avatar_url,
-    role: getEffectiveRole(projRow, u),
-    isGuest: u.is_guest
+    role: getEffectiveRole(projRow, u)
   }));
 }
 
@@ -252,8 +251,8 @@ async function handlePostProjects(req, res) {
          projectTitle || '', projectXml || '']
       );
       await client.query(
-        `INSERT INTO project_users (project_id, user_id, name, avatar_url, role, is_guest)
-         VALUES ($1, $2, $3, $4, 'owner', false)`,
+        `INSERT INTO project_users (project_id, user_id, name, avatar_url, role)
+         VALUES ($1, $2, $3, $4, 'owner')`,
         [projectId, ownerUserId, ownerName || 'Unknown', ownerAvatarUrl || '']
       );
     });
@@ -272,7 +271,7 @@ async function handleJoinProject(req, res, projectId) {
     if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
 
     const body = await readBody(req);
-    const { userId, name, avatarUrl, isGuest } = body;
+    const { userId, name, avatarUrl } = body;
 
     if (!userId) return jsonErr(res, 400, 'userId is required');
 
@@ -284,11 +283,9 @@ async function handleJoinProject(req, res, projectId) {
     }
 
     await db.query(
-      `INSERT INTO project_users (project_id, user_id, name, avatar_url, role, is_guest)
-       VALUES ($1, $2, $3, $4, NULL, $5)`,
-      [projectId, userId,
-       name || (isGuest ? 'Guest' : 'Unknown'),
-       avatarUrl || '', !!isGuest]
+      `INSERT INTO project_users (project_id, user_id, name, avatar_url, role)
+       VALUES ($1, $2, $3, $4, NULL)`,
+      [projectId, userId, name || 'Unknown', avatarUrl || '']
     );
 
     log('Projects', `User ${userId} (${name || 'Unknown'}) joined project ${projectId} (inherits globalRole: ${projRow.global_role})`);
