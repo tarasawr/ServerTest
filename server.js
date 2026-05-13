@@ -430,8 +430,8 @@ async function handleCreateSession(ws, client, msg) {
         return;
       }
 
-      // Owner-rejoin ownership reset: refresh ownerId to the new playerId so UpdateState
-      // (which compares client.playerId to session.ownerId) accepts the returning owner.
+      // Owner-rejoin ownership reset: refresh ownerId to the new playerId so the
+      // session host (used for leave-time ownership transfer) tracks the returning owner.
       if (isOwnerRejoin) {
         existing.ownerId = client.playerId;
       }
@@ -1043,14 +1043,15 @@ function handleDomainSelection(ws, client, msg) {
 function handleUpdateState(ws, client, msg) {
   const session = getSession(ws, client, false);
   if (!session) return;
-  if (client.playerId !== session.ownerId) {
-    log('Denied', `player=${client.playerId} update_state (not owner)`);
+  const player = session.players.get(client.playerId);
+  if (!player || !canEdit(player.role)) {
+    log('Denied', `player=${client.playerId} update_state (role=${player?.role || 'none'})`);
     return;
   }
   const xmlLen = (msg.projectXml || '').length;
   session.projectXml = msg.projectXml || session.projectXml;
   projectsModule.onXmlUpdated(session.projectId, session.projectXml);
-  log('Session', `${session.id} state updated by player=${client.playerId} (xml: ${xmlLen} chars, seq: ${session.sequenceNumber})`);
+  log('Session', `${session.id} state updated by player=${client.playerId} role=${player.role} (xml: ${xmlLen} chars, seq: ${session.sequenceNumber})`);
   broadcastStateChecksum(session); // DEBUG_STATE_VERIFIER
 }
 
