@@ -183,7 +183,7 @@ async function broadcastRoleChanged(sessions, projectId, userId, newRole) {
 
 async function serializeUsers(projectId, projRow) {
   const r = await db.query(
-    `SELECT user_id, name, avatar_url, role
+    `SELECT user_id, name, avatar_url, role, is_invitation_pending
      FROM project_users WHERE project_id = $1
      ORDER BY created_at`,
     [projectId]
@@ -192,7 +192,8 @@ async function serializeUsers(projectId, projRow) {
     userId: u.user_id,
     name: u.name,
     avatarUrl: u.avatar_url,
-    role: getEffectiveRole(projRow, u)
+    role: getEffectiveRole(projRow, u),
+    isInvitationPending: Boolean(u.is_invitation_pending)
   }));
 }
 
@@ -277,14 +278,22 @@ async function handleJoinProject(req, res, projectId) {
 
     const userRow = await getProjectUserRow(projectId, userId);
     if (userRow) {
+      // Joining accepts any pending invitation — clear the flag unconditionally
+      // (the WHERE narrows to rows still flagged, so this is a no-op otherwise).
+      await db.query(
+        `UPDATE project_users
+         SET is_invitation_pending = false
+         WHERE project_id = $1 AND user_id = $2 AND is_invitation_pending = true`,
+        [projectId, userId]
+      );
       const effectiveRole = getEffectiveRole(projRow, userRow);
       log('Projects', `User ${userId} already in project ${projectId} (role: ${effectiveRole})`);
       return jsonOk(res, { ok: true, role: effectiveRole, alreadyMember: true });
     }
 
     await db.query(
-      `INSERT INTO project_users (project_id, user_id, name, avatar_url, role)
-       VALUES ($1, $2, $3, $4, NULL)`,
+      `INSERT INTO project_users (project_id, user_id, name, avatar_url, role, is_invitation_pending)
+       VALUES ($1, $2, $3, $4, NULL, false)`,
       [projectId, userId, name || 'Unknown', avatarUrl || '']
     );
 
@@ -292,6 +301,50 @@ async function handleJoinProject(req, res, projectId) {
     jsonOk(res, { ok: true, role: projRow.global_role });
   } catch (e) {
     log('Projects', `ERROR handleJoinProject: ${e.message}`);
+    jsonErr(res, 500, 'Internal error');
+  }
+}
+
+// POST /projects/:projectId/users/:userId/invite
+// Owner-only. Adds (project, userId) with is_invitation_pending = true only if the
+// row does not already exist. If the user is already in the project (whether still
+// pending or already joined), the invite is a no-op — re-inviting an already-joined
+// user must NOT flip the pending flag back to true.
+async function handleInviteUser(req, res, projectId, userId) {
+  try {
+    const body = await readBody(req);
+    const ownerUserId = body && body.ownerUserId ? body.ownerUserId : '';
+    const name = body && typeof body.name === 'string' ? body.name : '';
+    const avatarUrl = body && typeof body.avatarUrl === 'string' ? body.avatarUrl : '';
+
+    if (!projectId || !userId || !ownerUserId) {
+      return jsonErr(res, 400, 'projectId, userId and ownerUserId are required');
+    }
+
+    const projRow = await getProjectRow(projectId);
+    if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
+
+    if (projRow.owner_user_id !== ownerUserId) {
+      return jsonErr(res, 403, 'Only the owner can invite users');
+    }
+
+    if (userId === ownerUserId) {
+      return jsonErr(res, 409, 'cannot invite self');
+    }
+
+    await db.transaction(async client => {
+      await client.query(
+        `INSERT INTO project_users (project_id, user_id, name, avatar_url, role, is_invitation_pending)
+         VALUES ($1, $2, $3, $4, NULL, true)
+         ON CONFLICT (project_id, user_id) DO NOTHING`,
+        [projectId, userId, name, avatarUrl]
+      );
+    });
+
+    log('Projects', `User ${userId} invited to project ${projectId} by owner ${ownerUserId}`);
+    jsonOk(res, { ok: true });
+  } catch (e) {
+    log('Projects', `ERROR handleInviteUser: ${e.message}`);
     jsonErr(res, 500, 'Internal error');
   }
 }
@@ -735,6 +788,13 @@ function handleRequest(req, res, url, sessions, projectIndex) {
   if (userRoleM) {
     if (req.method === 'GET') { handleGetUserRole(res, userRoleM[1], decodeURIComponent(userRoleM[2])); return true; }
     if (req.method === 'PUT') { handlePutUserRole(req, res, userRoleM[1], decodeURIComponent(userRoleM[2]), sessions); return true; }
+  }
+
+  // POST /projects/:id/users/:uid/invite
+  const inviteM = p.match(/^\/projects\/([^\/]+)\/users\/([^\/]+)\/invite$/);
+  if (inviteM && req.method === 'POST') {
+    handleInviteUser(req, res, inviteM[1], decodeURIComponent(inviteM[2]));
+    return true;
   }
 
   // DELETE /projects/:id/users/:uid

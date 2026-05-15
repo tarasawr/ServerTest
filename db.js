@@ -49,6 +49,18 @@ const INIT_SQL = `
 
   ALTER TABLE project_users DROP COLUMN IF EXISTS is_guest;
 
+  DO $$
+  BEGIN
+    IF EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_name = 'project_users' AND column_name = 'is_invited'
+    ) THEN
+      ALTER TABLE project_users RENAME COLUMN is_invited TO is_invitation_pending;
+    END IF;
+  END $$;
+
+  ALTER TABLE project_users ADD COLUMN IF NOT EXISTS is_invitation_pending BOOLEAN NOT NULL DEFAULT false;
+
   CREATE INDEX IF NOT EXISTS project_users_user_idx ON project_users(user_id);
 `;
 
