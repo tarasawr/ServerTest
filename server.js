@@ -978,22 +978,52 @@ function setBotSelection(session, playerId, targetId) {
   }
 }
 
+function getEntityWorldPos(session, targetId) {
+  const entity = session.entityState?.get(targetId);
+  if (entity?.position?.v) return { x: entity.position.v.x, z: entity.position.v.z };
+  return null;
+}
+
+function findBotSlot(inviteCode, playerId) {
+  const manager = sessionBotManagers.get(inviteCode);
+  if (!manager) return null;
+  return manager.slots.find(s => s.playerId === playerId) || null;
+}
+
 function mirrorSelectionToBots(session, sourceClient, targetId) {
   if (!sourceClient) { log('Mirror', 'skip: no sourceClient'); return; }
   if (sourceClient.isBot) { log('Mirror', `skip: source p${sourceClient.playerId} is bot`); return; }
+
+  const ids = getBotMirrors(session);
+  for (const pid of ids) {
+    if (!targetId) {
+      const slot = findBotSlot(session.inviteCode, pid);
+      if (slot) slot.walkTarget = null;
+      setBotSelection(session, pid, '');
+      continue;
+    }
+
+    const playerViewMode = session.players.get(pid)?.viewMode;
+    if (playerViewMode === '3d') {
+      const targetPos = getEntityWorldPos(session, targetId);
+      const slot = findBotSlot(session.inviteCode, pid);
+      if (targetPos && slot) {
+        slot.walkTarget = { x: targetPos.x, z: targetPos.z, onArrived: () => setBotSelection(session, pid, targetId) };
+        log('Mirror', `3D bot p${pid} walking to "${targetId.slice(-6)}" at (${targetPos.x.toFixed(2)},${targetPos.z.toFixed(2)})`);
+      } else {
+        setBotSelection(session, pid, targetId);
+      }
+    } else {
+      setBotSelection(session, pid, targetId);
+    }
+  }
 
   let total = 0, bots = 0, mirrorMarked = 0;
   for (const [, p] of session.players) {
     total++;
     const c = clients.get(p.ws);
-    if (c && c.isBot) {
-      bots++;
-      if (c.isMirror) mirrorMarked++;
-    }
+    if (c && c.isBot) { bots++; if (c.isMirror) mirrorMarked++; }
   }
-
-  const ids = getBotMirrors(session);
-  for (const pid of ids) setBotSelection(session, pid, targetId);
   log('Mirror', `target=${(targetId || '∅').slice(-6)} src=p${sourceClient.playerId} players=${total} bots=${bots} mirrorBots=${mirrorMarked} mirrored=[${ids.join(',')}]`);
 }
 
@@ -1243,6 +1273,7 @@ const BOT_LOOK_SPEED = 2;              // halved — same degrees/sec
 const BOT_ROOM_CHANGE = 0.0025;        // halved
 const BOT_WALL_MARGIN = 0.4;
 const BOT_VIEW_SWITCH_CHANCE = 0.005;  // chance per tick to toggle 2D/3D (~once per 20s)
+const BOT_ARRIVAL_DIST = 0.5;          // 3D-bot walk-to-target: arrival threshold (units)
 const BOT_TAP_MIN_MS = 1500;            // mobile-bot tap interval lower bound (2D only)
 const BOT_TAP_MAX_MS = 4000;            // mobile-bot tap interval upper bound (2D only)
 
@@ -1367,7 +1398,7 @@ function spawnSessionBots(inviteCode, projectXml) {
 
   const avatarPool = shuffledBotAvatars();
   for (let i = 0; i < BOT_COUNT; i++) {
-    const slot = { index: i, botWs: null, moveTimer: null, reconnectTimer: null, avatarUrl: avatarPool[i % avatarPool.length] };
+    const slot = { index: i, botWs: null, moveTimer: null, reconnectTimer: null, avatarUrl: avatarPool[i % avatarPool.length], walkTarget: null, playerId: null };
     manager.slots.push(slot);
     // Stagger initial connections
     const initialDelay = i * 2000 + Math.random() * 3000;
@@ -1437,10 +1468,28 @@ function connectBot(slot, inviteCode, rooms) {
     }
 
     if (msg.type === 'SessionState') {
+      slot.playerId = msg.playerId;
       log('Bots', `${name} connected at (${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})`);
 
       slot.moveTimer = setInterval(() => {
         if (botWs.readyState !== WebSocket.OPEN) { clearInterval(slot.moveTimer); return; }
+
+        if (viewMode === '3d' && slot.walkTarget) {
+          const dx = slot.walkTarget.x - x;
+          const dz = slot.walkTarget.z - z;
+          const dist = Math.sqrt(dx * dx + dz * dz);
+          if (dist >= BOT_ARRIVAL_DIST) {
+            x += (dx / dist) * BOT_WALK_SPEED;
+            z += (dz / dist) * BOT_WALK_SPEED;
+            rotY = Math.atan2(dx, dz) * 180 / Math.PI;
+          } else {
+            const cb = slot.walkTarget.onArrived;
+            slot.walkTarget = null;
+            if (cb) cb();
+          }
+          botWs.send(JSON.stringify({ type: 'Move', position: { x, y, z }, rotation: { x: 0, y: rotY, z: 0 }, viewMode }));
+          return;
+        }
 
         if (!paused && Math.random() < BOT_PAUSE_CHANCE) {
           paused = true;
