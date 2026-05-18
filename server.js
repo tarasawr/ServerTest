@@ -1469,6 +1469,14 @@ function connectBot(slot, inviteCode, rooms) {
 
     if (msg.type === 'SessionState') {
       slot.playerId = msg.playerId;
+      const freshAllRooms = parseRoomsFromXml(msg.projectXml || '');
+      const freshRooms = filterIndoorRooms(freshAllRooms);
+      if (freshRooms.length > 0) {
+        rooms = freshRooms;
+        currentRoom = rooms[slot.index % rooms.length];
+        const respawn = randInPoly(currentRoom);
+        x = respawn.x; z = respawn.z;
+      }
       log('Bots', `${name} connected at (${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})`);
 
       slot.moveTimer = setInterval(() => {
