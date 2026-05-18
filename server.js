@@ -8,7 +8,7 @@ const LEGACY_INVITE = '__legacy__';
 let BOT_COUNT = 0; // bots auto-spawned per session (0 to disable)
 let BOT_VIEW_MODE = 'random'; // 'random', '2d', '3d', 'panorama' — forced view mode for bots
 let BOT_REJOIN = true; // whether bots disconnect after session time and reconnect
-let BOT_MOBILE_MODE = 'all'; // 'all' (every bot is mobile) or 'random' (50/50 mobile/desktop). Mirror bots are always mobile.
+let BOT_MOBILE_MODE = 'all'; // 'all' (every bot is mobile) or 'random' (50/50 mobile/desktop)
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -48,7 +48,7 @@ const server = http.createServer((req, res) => {
   // GET /bots?count=2 — spawn bots in all active sessions
   // GET /bots?count=0 — disable bots (new sessions won't get bots)
   // GET /bots?mode=2d|3d|panorama|random — force bot view mode
-  // GET /bots?mobile=all|random — toggle bot mobile flag (all=every bot mobile, random=50/50). Mirror bots always mobile.
+  // GET /bots?mobile=all|random — toggle bot mobile flag (all=every bot mobile, random=50/50)
   // GET /bots?rejoin=0|1 — toggle disconnect/reconnect cycle (0 keeps bots online forever)
   // GET /bots?sessionMin=N&sessionMax=N — bot session duration in seconds (online time)
   // GET /bots?offlineMin=N&offlineMax=N — bot offline duration in seconds (before reconnect)
@@ -887,24 +887,25 @@ function broadcastSelection(session, excludeWs, playerId, targetId) {
   });
 }
 
-const BOT_MIRROR_COUNT = 6;
 const BOT_RELEASE_MIN_MS = 4000;
 const BOT_RELEASE_MAX_MS = 8000;
 const BOT_RECLAIM_MIN_MS = 1000;
 const BOT_RECLAIM_MAX_MS = 3000;
 
-function getBotMirrors(session) {
-  const mirrorBots = [];
-  const otherBots = [];
+function getBotMirrors(session, targetId) {
+  const result = [];
   for (const [pid, p] of session.players) {
     const c = clients.get(p.ws);
-    if (!c || !c.isBot) continue;
-    if (c.isMirror) mirrorBots.push(pid);
-    else otherBots.push(pid);
+    if (c && c.isBot) result.push(pid);
   }
-  mirrorBots.sort((a, b) => a - b);
-  otherBots.sort((a, b) => a - b);
-  return [...mirrorBots, ...otherBots].slice(0, BOT_MIRROR_COUNT);
+  result.sort((a, b) => a - b);
+  if (!targetId || result.length === 0) return result;
+  const count = 1 + Math.floor(Math.random() * result.length);
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result.slice(0, count);
 }
 
 function clearBotReleaseTimer(session, playerId) {
@@ -994,7 +995,7 @@ function mirrorSelectionToBots(session, sourceClient, targetId) {
   if (!sourceClient) { log('Mirror', 'skip: no sourceClient'); return; }
   if (sourceClient.isBot) { log('Mirror', `skip: source p${sourceClient.playerId} is bot`); return; }
 
-  const ids = getBotMirrors(session);
+  const ids = getBotMirrors(session, targetId);
   for (const pid of ids) {
     if (!targetId) {
       const slot = findBotSlot(session.inviteCode, pid);
@@ -1432,13 +1433,8 @@ function connectBot(slot, inviteCode, rooms) {
   let len = Math.sqrt(dirX * dirX + dirZ * dirZ) || 1; dirX /= len; dirZ /= len;
   let rotY = Math.random() * 360;
   let paused = false, pauseTicks = 0, lookDir = 1;
-  const isMirrorBot = slot.index < BOT_MIRROR_COUNT;
-  const isMobileBot = isMirrorBot || BOT_MOBILE_MODE === 'all' || (BOT_MOBILE_MODE === 'random' && Math.random() < 0.5);
-  let viewMode = isMirrorBot
-    ? '2d'
-    : (BOT_VIEW_MODE === 'random'
-        ? (slot.index % 2 === 0 ? '2d' : '3d')
-        : BOT_VIEW_MODE);
+  const isMobileBot = BOT_MOBILE_MODE === 'all' || (BOT_MOBILE_MODE === 'random' && Math.random() < 0.5);
+  let viewMode = BOT_VIEW_MODE === 'random' ? (slot.index % 2 === 0 ? '2d' : '3d') : BOT_VIEW_MODE;
 
   let tapX = x, tapZ = z;
   let nextTapAt = 0;
@@ -1447,7 +1443,7 @@ function connectBot(slot, inviteCode, rooms) {
     botWs.send(JSON.stringify({
       type: 'JoinSession', inviteCode, userName: name,
       avatarUrl: slot.avatarUrl || '',
-      isMobile: isMobileBot, isBot: true, isMirror: isMirrorBot
+      isMobile: isMobileBot, isBot: true
     }));
   });
 
@@ -1533,9 +1529,7 @@ function connectBot(slot, inviteCode, rooms) {
           rotY = Math.atan2(dirX, dirZ) * 180 / Math.PI;
         }
 
-        if (isMirrorBot) {
-          viewMode = '2d';
-        } else if (BOT_VIEW_MODE === 'random' && Math.random() < BOT_VIEW_SWITCH_CHANCE) {
+        if (BOT_VIEW_MODE === 'random' && Math.random() < BOT_VIEW_SWITCH_CHANCE) {
           viewMode = viewMode === '3d' ? '2d' : '3d';
           log('Bots', `${name} switched to ${viewMode}`);
         } else if (BOT_VIEW_MODE !== 'random') {
