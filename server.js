@@ -62,10 +62,11 @@ const server = http.createServer((req, res) => {
     const sessionMax = url.searchParams.get('sessionMax');
     const offlineMin = url.searchParams.get('offlineMin');
     const offlineMax = url.searchParams.get('offlineMax');
+    const reset = url.searchParams.get('reset');
 
     if (count !== null) {
       BOT_COUNT = Math.max(0, Math.min(10, parseInt(count) || 0));
-      if (BOT_COUNT > 0) {
+      if (BOT_COUNT > 0 && reset === null) {
         for (const [code, s] of sessions) {
           if (code === LEGACY_INVITE) continue;
           spawnSessionBots(code, s.projectXml);
@@ -106,6 +107,29 @@ const server = http.createServer((req, res) => {
       const v = Math.max(BOT_MIN_OFFLINE_SEC, parseInt(offlineMax) || BOT_MAX_OFFLINE_SEC);
       BOT_MAX_OFFLINE_SEC = v;
       log('Bots', `Bot offlineMax set to ${BOT_MAX_OFFLINE_SEC}s`);
+    }
+
+    if (reset !== null && reset !== '0' && reset !== 'false') {
+      const managerCodes = Array.from(sessionBotManagers.keys());
+      for (const code of managerCodes) stopBotManager(code);
+
+      let strayKicked = 0;
+      for (const [ws, c] of clients) {
+        if (c && c.isBot) {
+          try { ws.close(); } catch (e) {}
+          strayKicked++;
+        }
+      }
+      log('Bots', `RESET: stopped ${managerCodes.length} manager(s), kicked ${strayKicked} stray bot ws`);
+
+      if (BOT_COUNT > 0) {
+        for (const [code, s] of sessions) {
+          if (code === LEGACY_INVITE) continue;
+          if (!hasHumanPlayers(s)) continue;
+          spawnSessionBots(code, s.projectXml);
+        }
+        log('Bots', `RESET: respawned bots for active sessions (count=${BOT_COUNT})`);
+      }
     }
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -579,9 +603,14 @@ function leaveSession(ws, client) {
 
   session.players.delete(client.playerId);
 
-  // If no human players left, kick all bots
-  if (!client.isBot && session.players.size > 0 && !hasHumanPlayers(session)) {
+  // If the last human left, kick all bots AND fully tear down the session.
+  // Bots' subsequent ws-close → leaveSession() will be a no-op (session already gone).
+  if (!client.isBot && !hasHumanPlayers(session)) {
+    const botCount = session.players.size;
     kickSessionBots(session);
+    sessions.delete(session.inviteCode);
+    if (session.projectId) projectIndex.delete(session.projectId);
+    log('Session', `${session.id} torn down (last human left, kicked ${botCount} bot(s), cache cleared)`);
     return;
   }
 
