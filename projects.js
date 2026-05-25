@@ -132,6 +132,33 @@ async function getProjectUserRow(projectId, userId, client) {
   return r.rows[0] || null;
 }
 
+// Centralised ownership check used by every write endpoint.
+// Returns true when the caller IS the project's owner. On mismatch the helper
+// writes a 403 response itself and returns false — handlers MUST early-return
+// after a false (writing twice to `res` crashes Node's HTTP layer).
+//
+// `res` may be null when the caller wants a pure predicate (e.g. tests).
+// In that case no HTTP response is written.
+function assertIsOwner(projRow, callerUserId, res) {
+  if (!projRow) {
+    if (res) jsonErr(res, 404, 'Project not found');
+    return false;
+  }
+  if (!callerUserId || callerUserId !== projRow.owner_user_id) {
+    if (res) jsonErr(res, 403, 'Only the owner can perform this action');
+    return false;
+  }
+  return true;
+}
+
+// Extracts the caller identity from the request body. New functionality —
+// callerUserId is required on every write endpoint; missing/empty returns null
+// and the handler responds with 403 via assertIsOwner.
+function resolveCallerUserId(body) {
+  return body && typeof body.callerUserId === 'string' && body.callerUserId !== ''
+    ? body.callerUserId : null;
+}
+
 // Effective role: 'owner' if user.role == 'owner', else user.role (if set), else project.global_role.
 // `userRow` may be null (user not in project) → falls back to global_role.
 function getEffectiveRole(projRow, userRow) {
@@ -208,57 +235,60 @@ async function handlePostProjects(req, res) {
   }
 
   try {
-    const existing = await getProjectRow(projectId);
+    // Atomic UPSERT to eliminate SELECT+INSERT race when two concurrent
+    // RegisterProject calls fire (e.g. owner opens SharingPopup twice in
+    // quick succession on flaky network). `xmax = 0` returns true for the
+    // inserted row and false for the updated row — gives us insert-vs-update
+    // signal in a single round-trip. Supported on PostgreSQL >= 9.5 (Neon ok).
+    //
+    // On UPDATE: keep existing owner / global_role, refresh xml/title/syncDate
+    // ONLY when caller supplied them (COALESCE keeps title if caller sent '').
+    const upsert = await db.query(
+      `INSERT INTO projects (project_id, owner_user_id, owner_name, project_title,
+                             project_xml, global_role, last_sync_date)
+       VALUES ($1, $2, $3, $4, $5, 'can_view', NOW())
+       ON CONFLICT (project_id) DO UPDATE
+         SET project_xml = EXCLUDED.project_xml,
+             project_title = CASE WHEN EXCLUDED.project_title <> ''
+                                  THEN EXCLUDED.project_title
+                                  ELSE projects.project_title END,
+             last_sync_date = NOW()
+       RETURNING (xmax = 0) AS inserted, owner_user_id`,
+      [projectId, ownerUserId, ownerName || 'Unknown',
+       projectTitle || '', projectXml || '']
+    );
 
-    if (existing) {
-      // Re-registration: idempotent update of xml/title/syncDate, owner stays as-is.
-      const updates = [];
-      const params = [];
-      let i = 1;
-      if (typeof projectXml === 'string') {
-        updates.push(`project_xml = $${i++}`);
-        params.push(projectXml);
-      }
-      if (typeof projectTitle === 'string' && projectTitle !== '') {
-        updates.push(`project_title = $${i++}`);
-        params.push(projectTitle);
-      }
-      updates.push(`last_sync_date = NOW()`);
-      params.push(projectId);
+    const inserted = upsert.rows[0].inserted;
+    const actualOwnerId = upsert.rows[0].owner_user_id;
+
+    if (inserted) {
+      // Brand-new project — insert the owner row in project_users.
+      // Separate INSERT (not a transaction) is acceptable because the UPSERT
+      // above is itself atomic; if this INSERT fails the projects row stays
+      // ownerless-in-users-table and the next RegisterProject call won't
+      // re-insert (ownership is recorded on `projects.owner_user_id`).
       await db.query(
-        `UPDATE projects SET ${updates.join(', ')} WHERE project_id = $${i}`,
-        params
+        `INSERT INTO project_users (project_id, user_id, name, avatar_url, role)
+         VALUES ($1, $2, $3, $4, 'owner')
+         ON CONFLICT (project_id, user_id) DO NOTHING`,
+        [projectId, ownerUserId, ownerName || 'Unknown', ownerAvatarUrl || '']
       );
-
-      if (ownerAvatarUrl) {
+      log('Projects', `Registered project ${projectId} by owner ${ownerUserId}`);
+    } else {
+      // Re-registration: refresh owner's avatar if provided. Owner identity
+      // (projects.owner_user_id) is NOT changed — only the original owner
+      // can re-register, foreign actors would land here through other endpoints
+      // protected by assertIsOwner.
+      if (ownerAvatarUrl && actualOwnerId === ownerUserId) {
         await db.query(
           `UPDATE project_users SET avatar_url = $1
            WHERE project_id = $2 AND user_id = $3`,
           [ownerAvatarUrl, projectId, ownerUserId]
         );
       }
-
-      log('Projects', `Re-registered project ${projectId} by owner ${ownerUserId}`);
-      return jsonOk(res, { ok: true, projectId, shareUrl: `/projects/${projectId}` });
+      log('Projects', `Re-registered project ${projectId} by owner ${ownerUserId} (existing owner: ${actualOwnerId})`);
     }
 
-    // New project: insert project row + owner user atomically.
-    await db.transaction(async client => {
-      await client.query(
-        `INSERT INTO projects (project_id, owner_user_id, owner_name, project_title,
-                               project_xml, global_role)
-         VALUES ($1, $2, $3, $4, $5, 'can_view')`,
-        [projectId, ownerUserId, ownerName || 'Unknown',
-         projectTitle || '', projectXml || '']
-      );
-      await client.query(
-        `INSERT INTO project_users (project_id, user_id, name, avatar_url, role)
-         VALUES ($1, $2, $3, $4, 'owner')`,
-        [projectId, ownerUserId, ownerName || 'Unknown', ownerAvatarUrl || '']
-      );
-    });
-
-    log('Projects', `Registered project ${projectId} by owner ${ownerUserId}`);
     jsonOk(res, { ok: true, projectId, shareUrl: `/projects/${projectId}` });
   } catch (e) {
     log('Projects', `ERROR handlePostProjects: ${e.message}`);
@@ -313,22 +343,18 @@ async function handleJoinProject(req, res, projectId) {
 async function handleInviteUser(req, res, projectId, userId) {
   try {
     const body = await readBody(req);
-    const ownerUserId = body && body.ownerUserId ? body.ownerUserId : '';
     const name = body && typeof body.name === 'string' ? body.name : '';
     const avatarUrl = body && typeof body.avatarUrl === 'string' ? body.avatarUrl : '';
+    const callerUserId = resolveCallerUserId(body);
 
-    if (!projectId || !userId || !ownerUserId) {
-      return jsonErr(res, 400, 'projectId, userId and ownerUserId are required');
+    if (!projectId || !userId) {
+      return jsonErr(res, 400, 'projectId and userId are required');
     }
 
     const projRow = await getProjectRow(projectId);
-    if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
+    if (!assertIsOwner(projRow, callerUserId, res)) return;
 
-    if (projRow.owner_user_id !== ownerUserId) {
-      return jsonErr(res, 403, 'Only the owner can invite users');
-    }
-
-    if (userId === ownerUserId) {
+    if (userId === projRow.owner_user_id) {
       return jsonErr(res, 409, 'cannot invite self');
     }
 
@@ -341,7 +367,7 @@ async function handleInviteUser(req, res, projectId, userId) {
       );
     });
 
-    log('Projects', `User ${userId} invited to project ${projectId} by owner ${ownerUserId}`);
+    log('Projects', `User ${userId} invited to project ${projectId} by owner ${callerUserId}`);
     jsonOk(res, { ok: true });
   } catch (e) {
     log('Projects', `ERROR handleInviteUser: ${e.message}`);
@@ -358,9 +384,12 @@ async function handleGetProject(res, projectId) {
       'SELECT COUNT(*)::int AS n FROM project_users WHERE project_id = $1',
       [projectId]
     );
+    // ownerUserId намеренно НЕ отдаём — клиент держит ownership locally
+    // через ProjectOwnershipController. assertIsOwner всё ещё авторитативно
+    // проверяет владельца при write-операциях, читая projects.owner_user_id
+    // из БД — но в read-API это поле клиенту не нужно.
     jsonOk(res, {
       projectId: projRow.project_id,
-      ownerUserId: projRow.owner_user_id,
       ownerName: projRow.owner_name,
       lastSyncDate: isoDate(projRow.last_sync_date),
       globalRole: projRow.global_role || 'can_view',
@@ -381,21 +410,6 @@ async function handleGetProjectUsers(res, projectId) {
     jsonOk(res, { globalRole: projRow.global_role, users });
   } catch (e) {
     log('Projects', `ERROR handleGetProjectUsers: ${e.message}`);
-    jsonErr(res, 500, 'Internal error');
-  }
-}
-
-async function handleGetUserRole(res, projectId, userId) {
-  try {
-    const projRow = await getProjectRow(projectId);
-    if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
-
-    const userRow = await getProjectUserRow(projectId, userId);
-    if (!userRow) return jsonErr(res, 404, `User ${userId} not in project ${projectId}`);
-
-    jsonOk(res, { userId, role: getEffectiveRole(projRow, userRow) });
-  } catch (e) {
-    log('Projects', `ERROR handleGetUserRole: ${e.message}`);
     jsonErr(res, 500, 'Internal error');
   }
 }
@@ -434,8 +448,14 @@ async function handleGetUserProjects(res, userId) {
 
 async function handlePutUserRole(req, res, projectId, userId, sessions) {
   try {
+    const body = await readBody(req);
+    const { role } = body;
+    const callerUserId = resolveCallerUserId(body);
+
     const projRow = await getProjectRow(projectId);
-    if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
+    // Closes critical gap: previously NO ownership check at all — any caller
+    // could change anyone's role on any project.
+    if (!assertIsOwner(projRow, callerUserId, res)) return;
 
     const userRow = await getProjectUserRow(projectId, userId);
     if (!userRow) return jsonErr(res, 404, `User ${userId} not in project ${projectId}`);
@@ -444,8 +464,6 @@ async function handlePutUserRole(req, res, projectId, userId, sessions) {
       return jsonErr(res, 400, "Cannot change the owner's role");
     }
 
-    const body = await readBody(req);
-    const { role } = body;
     if (!['can_view', 'can_edit'].includes(role)) {
       return jsonErr(res, 400, 'role must be can_view or can_edit');
     }
@@ -467,15 +485,13 @@ async function handlePutUserRole(req, res, projectId, userId, sessions) {
 
 async function handlePutProjectGlobalRole(req, res, projectId, sessions) {
   try {
-    const projRow = await getProjectRow(projectId);
-    if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
-
     const body = await readBody(req);
-    const { globalRole, ownerUserId } = body;
+    const { globalRole } = body;
+    const callerUserId = resolveCallerUserId(body);
 
-    if (ownerUserId !== projRow.owner_user_id) {
-      return jsonErr(res, 403, 'Only the owner can change the project global role');
-    }
+    const projRow = await getProjectRow(projectId);
+    if (!assertIsOwner(projRow, callerUserId, res)) return;
+
     if (!['can_view', 'can_edit'].includes(globalRole)) {
       return jsonErr(res, 400, 'globalRole must be can_view or can_edit');
     }
@@ -484,7 +500,7 @@ async function handlePutProjectGlobalRole(req, res, projectId, sessions) {
       'UPDATE projects SET global_role = $1 WHERE project_id = $2',
       [globalRole, projectId]
     );
-    log('Projects', `Global role of project ${projectId} changed to ${globalRole} by owner ${ownerUserId}`);
+    log('Projects', `Global role of project ${projectId} changed to ${globalRole} by owner ${callerUserId}`);
 
     // userId === '' = global role change applies to everyone whose effective role is 'global'.
     // Per-user role overrides are NOT rewritten — they keep their explicit assignment.
@@ -516,15 +532,11 @@ async function handlePutSync(req, res, projectId) {
 
 async function handleDeleteAllUsers(req, res, projectId) {
   try {
-    const projRow = await getProjectRow(projectId);
-    if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
-
     const body = await readBody(req);
-    const { ownerUserId } = body;
+    const callerUserId = resolveCallerUserId(body);
 
-    if (ownerUserId !== projRow.owner_user_id) {
-      return jsonErr(res, 403, 'Only the owner can remove all users');
-    }
+    const projRow = await getProjectRow(projectId);
+    if (!assertIsOwner(projRow, callerUserId, res)) return;
 
     const r = await db.query(
       'DELETE FROM project_users WHERE project_id = $1 AND user_id <> $2',
@@ -541,19 +553,15 @@ async function handleDeleteAllUsers(req, res, projectId) {
 
 async function handleDeleteProject(req, res, projectId, sessions, projectIndex) {
   try {
-    const projRow = await getProjectRow(projectId);
-    if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
-
     const body = await readBody(req);
-    const { ownerUserId } = body;
+    const callerUserId = resolveCallerUserId(body);
 
-    if (ownerUserId !== projRow.owner_user_id) {
-      return jsonErr(res, 403, 'Only the owner can delete the project');
-    }
+    const projRow = await getProjectRow(projectId);
+    if (!assertIsOwner(projRow, callerUserId, res)) return;
 
     // ON DELETE CASCADE on project_users.project_id removes user rows automatically.
     await db.query('DELETE FROM projects WHERE project_id = $1', [projectId]);
-    log('Projects', `Project ${projectId} deleted by owner ${ownerUserId}`);
+    log('Projects', `Project ${projectId} deleted by owner ${callerUserId}`);
 
     // Terminate all active multiplayer sessions linked to this project.
     if (sessions) {
@@ -582,15 +590,12 @@ async function handleDeleteProject(req, res, projectId, sessions, projectIndex) 
 
 async function handleDeleteUser(req, res, projectId, userId, sessions) {
   try {
-    const projRow = await getProjectRow(projectId);
-    if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
-
     const body = await readBody(req);
-    const { ownerUserId } = body;
+    const callerUserId = resolveCallerUserId(body);
 
-    if (ownerUserId !== projRow.owner_user_id) {
-      return jsonErr(res, 403, 'Only the owner can remove users');
-    }
+    const projRow = await getProjectRow(projectId);
+    if (!assertIsOwner(projRow, callerUserId, res)) return;
+
     if (userId === projRow.owner_user_id) {
       return jsonErr(res, 400, 'Cannot remove the owner');
     }
@@ -783,11 +788,11 @@ function handleRequest(req, res, url, sessions, projectIndex) {
     return true;
   }
 
-  // GET/PUT /projects/:id/users/:uid/role
+  // PUT /projects/:id/users/:uid/role
   const userRoleM = p.match(/^\/projects\/([^\/]+)\/users\/([^\/]+)\/role$/);
-  if (userRoleM) {
-    if (req.method === 'GET') { handleGetUserRole(res, userRoleM[1], decodeURIComponent(userRoleM[2])); return true; }
-    if (req.method === 'PUT') { handlePutUserRole(req, res, userRoleM[1], decodeURIComponent(userRoleM[2]), sessions); return true; }
+  if (userRoleM && req.method === 'PUT') {
+    handlePutUserRole(req, res, userRoleM[1], decodeURIComponent(userRoleM[2]), sessions);
+    return true;
   }
 
   // POST /projects/:id/users/:uid/invite
@@ -876,5 +881,6 @@ function onXmlUpdated(projectId, xml) {
 
 module.exports = {
   handleRequest, onXmlUpdated,
-  getProjectRow, getProjectUserRow, getEffectiveRole
+  getProjectRow, getProjectUserRow, getEffectiveRole,
+  assertIsOwner, resolveCallerUserId
 };
