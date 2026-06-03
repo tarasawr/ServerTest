@@ -527,6 +527,22 @@ async function handleJoinSession(ws, client, msg) {
 
   const session = sessions.get(msg.inviteCode);
   if (!session) { sendError(ws, 'NOT_FOUND', `Session not found: ${msg.inviteCode}`); return; }
+
+  // Reconnect: if the same userId is already in the session under a different ws (zombie),
+  // kick the old connection so the new join is a clean rejoin. Bots have no userId.
+  if (msg.userId && !msg.isBot) {
+    for (const [, existingPlayer] of session.players) {
+      if (existingPlayer.userId !== msg.userId) continue;
+      if (existingPlayer.ws === ws) continue;
+      const oldWs = existingPlayer.ws;
+      const oldClient = clients.get(oldWs);
+      log('Session', `Reconnect: closing zombie ws for userId=${msg.userId} (old playerId=${existingPlayer.playerId})`);
+      if (oldClient) leaveSession(oldWs, oldClient);
+      try { oldWs.close(4000, 'replaced by reconnect'); } catch (e) {}
+      break;
+    }
+  }
+
   if (session.players.size >= 25) { sendError(ws, 'SESSION_FULL', 'Max 25 players'); return; }
 
   if (msg.isBot) client.isBot = true;
@@ -561,6 +577,7 @@ async function handleJoinSession(ws, client, msg) {
   log('Session', `Player ${client.playerId} joined ${session.id} as ${role} (total: ${session.players.size}) — PlayerJoined deferred until first Move`);
 
   sendSessionStateTo(session, ws, role);
+  scheduleDeferredJoinFallback(session, player);
 }
 
 function hasHumanPlayers(session) {
@@ -600,6 +617,12 @@ function leaveSession(ws, client) {
     log('Select', `auto-release "${releasedTarget.slice(-6)}" (p${client.playerId} leaving)`);
   }
   session.lastActivityByPlayer?.delete(client.playerId);
+
+  const leavingPlayer = session.players.get(client.playerId);
+  if (leavingPlayer?.pendingJoinedTimer) {
+    clearTimeout(leavingPlayer.pendingJoinedTimer);
+    leavingPlayer.pendingJoinedTimer = null;
+  }
 
   session.players.delete(client.playerId);
 
@@ -664,16 +687,7 @@ function handleMove(ws, client, msg) {
   // Defer PlayerJoined broadcast until the new player reports a real (non-zero) position.
   // Avoids spawning the avatar at (0,0,0) and snapping/lerping later.
   if (player && player.pendingJoinedBroadcast && isNonZeroPosition(msg.position)) {
-    player.pendingJoinedBroadcast = false;
-    broadcastToSession(session, ws, {
-      type: 'PlayerJoined', playerId: client.playerId,
-      userId: player.userId, userName: player.userName, role: player.role,
-      color: player.color, avatarUrl: player.avatarUrl || '',
-      position: player.position, rotation: player.rotation,
-      viewMode: player.viewMode || '3d',
-      isMobile: !!player.isMobile
-    });
-    log('Session', `Player ${client.playerId} PlayerJoined broadcast (first real position received)`);
+    flushDeferredJoin(session, player, 'first real position received');
   }
 
   // Don't relay PlayerMoved while the player is still pending — others don't know about them yet.
@@ -689,6 +703,36 @@ function handleMove(ws, client, msg) {
 function isNonZeroPosition(pos) {
   if (!pos) return false;
   return Math.abs(pos.x) > 0.001 || Math.abs(pos.y) > 0.001 || Math.abs(pos.z) > 0.001;
+}
+
+const DEFERRED_JOIN_TIMEOUT_MS = 10_000;
+
+function flushDeferredJoin(session, player, reason) {
+  if (!player.pendingJoinedBroadcast) return;
+  player.pendingJoinedBroadcast = false;
+  if (player.pendingJoinedTimer) {
+    clearTimeout(player.pendingJoinedTimer);
+    player.pendingJoinedTimer = null;
+  }
+  broadcastToSession(session, player.ws, {
+    type: 'PlayerJoined', playerId: player.playerId,
+    userId: player.userId, userName: player.userName, role: player.role,
+    color: player.color, avatarUrl: player.avatarUrl || '',
+    position: player.position, rotation: player.rotation,
+    viewMode: player.viewMode || '3d',
+    isMobile: !!player.isMobile
+  });
+  log('Session', `Player ${player.playerId} PlayerJoined broadcast (${reason})`);
+}
+
+function scheduleDeferredJoinFallback(session, player) {
+  if (player.pendingJoinedTimer) clearTimeout(player.pendingJoinedTimer);
+  player.pendingJoinedTimer = setTimeout(() => {
+    player.pendingJoinedTimer = null;
+    if (!session.players.has(player.playerId)) return;
+    if (!player.pendingJoinedBroadcast) return;
+    flushDeferredJoin(session, player, `fallback ${DEFERRED_JOIN_TIMEOUT_MS}ms timeout`);
+  }, DEFERRED_JOIN_TIMEOUT_MS);
 }
 
 function handleDomainTransform(ws, client, msg) {
