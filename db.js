@@ -42,7 +42,7 @@ const INIT_SQL = `
     user_id     TEXT        NOT NULL,
     name        TEXT        NOT NULL DEFAULT 'Unknown',
     avatar_url  TEXT        NOT NULL DEFAULT '',
-    role        TEXT,        -- NULL = inherits project.global_role; 'owner' | 'can_view' | 'can_edit' otherwise
+    role        TEXT,        -- NULL = inherits project.global_role; 'owner' | 'can_view' | 'can_edit' | 'no_access' otherwise
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (project_id, user_id)
   );

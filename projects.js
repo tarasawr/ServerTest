@@ -12,6 +12,8 @@ const db = require('./db');
 //
 // `role` is NULL when a user inherits the project-level global_role.
 // 'owner' / 'can_edit' / 'can_view' are explicit overrides.
+// 'no_access' is a soft-removed user: the row is kept (so re-join via the share
+// link can be rejected) but the user is hidden from every listing endpoint.
 
 // --- One-shot migration from legacy JSON storage ---
 
@@ -211,7 +213,7 @@ async function broadcastRoleChanged(sessions, projectId, userId, newRole) {
 async function serializeUsers(projectId, projRow) {
   const r = await db.query(
     `SELECT user_id, name, avatar_url, role, is_invitation_pending
-     FROM project_users WHERE project_id = $1
+     FROM project_users WHERE project_id = $1 AND role IS DISTINCT FROM 'no_access'
      ORDER BY created_at`,
     [projectId]
   );
@@ -307,6 +309,13 @@ async function handleJoinProject(req, res, projectId) {
     if (!userId) return jsonErr(res, 400, 'userId is required');
 
     const userRow = await getProjectUserRow(projectId, userId);
+    if (userRow && userRow.role === 'no_access') {
+      // Owner revoked this user's access (handleDeleteUser). The share link is no
+      // longer valid for them — reject with a distinct code the client maps to a
+      // "link unavailable" message instead of re-granting inherited access.
+      log('Projects', `Rejected join: user ${userId} has no_access in project ${projectId}`);
+      return jsonErr(res, 403, 'no_access');
+    }
     if (userRow) {
       // Joining accepts any pending invitation — clear the flag unconditionally
       // (the WHERE narrows to rows still flagged, so this is a no-op otherwise).
@@ -381,7 +390,8 @@ async function handleGetProject(res, projectId) {
     if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
 
     const { rows } = await db.query(
-      'SELECT COUNT(*)::int AS n FROM project_users WHERE project_id = $1',
+      `SELECT COUNT(*)::int AS n FROM project_users
+       WHERE project_id = $1 AND role IS DISTINCT FROM 'no_access'`,
       [projectId]
     );
     // ownerUserId намеренно НЕ отдаём — клиент держит ownership locally
@@ -421,7 +431,7 @@ async function handleGetUserProjects(res, userId) {
               p.last_sync_date, pu.role AS user_role
        FROM projects p
        JOIN project_users pu ON pu.project_id = p.project_id
-       WHERE pu.user_id = $1
+       WHERE pu.user_id = $1 AND pu.role IS DISTINCT FROM 'no_access'
        ORDER BY p.last_sync_date DESC`,
       [userId]
     );
@@ -600,13 +610,19 @@ async function handleDeleteUser(req, res, projectId, userId, sessions) {
       return jsonErr(res, 400, 'Cannot remove the owner');
     }
 
+    // Soft-remove: keep the row but downgrade to 'no_access'. This lets the
+    // server recognise a revoked user if they try to re-open the share link
+    // (handleJoinProject rejects 'no_access') instead of silently re-granting
+    // them inherited access. is_invitation_pending is cleared so the stale row
+    // never resurfaces as a pending invite.
     const r = await db.query(
-      'DELETE FROM project_users WHERE project_id = $1 AND user_id = $2',
+      `UPDATE project_users SET role = 'no_access', is_invitation_pending = false
+       WHERE project_id = $1 AND user_id = $2`,
       [projectId, userId]
     );
     if (r.rowCount === 0) return jsonErr(res, 404, `User ${userId} not in project ${projectId}`);
 
-    log('Projects', `User ${userId} removed from project ${projectId} by owner`);
+    log('Projects', `Access of user ${userId} revoked (no_access) in project ${projectId} by owner`);
 
     // Notify the kicked player (if currently in a session linked to this project) and force-close their WS.
     // server.js leaveSession() handles ownership transfer + PlayerLeft broadcast.
