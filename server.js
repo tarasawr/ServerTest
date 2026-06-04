@@ -569,23 +569,30 @@ async function handleJoinSession(ws, client, msg) {
   const session = sessions.get(msg.inviteCode);
   if (!session) { sendError(ws, 'NOT_FOUND', `Session not found: ${msg.inviteCode}`); return; }
 
-  // Reconnect: kick zombie by userId OR reconnectToken. Handles both authenticated users and
-  // anonymous users whose old TCP connection is still open (no FIN/RST received by server yet).
+  // Reconnect: kick every zombie matching this user by userId OR reconnectToken. Handles both
+  // authenticated users and anonymous users whose old TCP connection is still open (no FIN/RST yet).
+  // Both keys must be non-empty to match — guards against matching all token-less players together.
   if (!msg.isBot) {
+    const hasUserId = typeof msg.userId === 'string' && msg.userId.length > 0;
+    const hasToken = typeof msg.reconnectToken === 'string' && msg.reconnectToken.length > 0;
+
+    const zombies = [];
     for (const [, existingPlayer] of session.players) {
       if (existingPlayer.ws === ws) continue;
-      const matchById    = msg.userId         && existingPlayer.userId         === msg.userId;
-      const matchByToken = msg.reconnectToken && existingPlayer.reconnectToken === msg.reconnectToken;
-      if (!matchById && !matchByToken) continue;
-      const oldWs = existingPlayer.ws;
+      const matchById = hasUserId && existingPlayer.userId === msg.userId;
+      const matchByToken = hasToken && existingPlayer.reconnectToken === msg.reconnectToken;
+      if (matchById || matchByToken)
+        zombies.push({ player: existingPlayer, reason: matchById ? `userId=${msg.userId}` : `token=${msg.reconnectToken}` });
+    }
+
+    for (const { player, reason } of zombies) {
+      const oldWs = player.ws;
       const oldClient = clients.get(oldWs);
-      const reason = matchById ? `userId=${msg.userId}` : `token=${msg.reconnectToken}`;
-      log('Session', `Reconnect: kicking zombie by ${reason} (old playerId=${existingPlayer.playerId})`);
+      log('Session', `Reconnect: kicking zombie by ${reason} (old playerId=${player.playerId})`);
       if (oldClient) leaveSession(oldWs, oldClient);
       wsLastSeen.delete(oldWs);
       clients.delete(oldWs);
       try { oldWs.terminate(); } catch (e) {}
-      break;
     }
   }
 
