@@ -574,6 +574,9 @@ async function handleJoinSession(ws, client, msg) {
   session.players.set(client.playerId, player);
   client.sessionId = session.id;
 
+  // Restore ownerId when the session owner reconnects after a zombie-kick ownership transfer
+  if (role === 'owner') session.ownerId = client.playerId;
+
   log('Session', `Player ${client.playerId} joined ${session.id} as ${role} (total: ${session.players.size}) — PlayerJoined deferred until first Move`);
 
   sendSessionStateTo(session, ws, role);
