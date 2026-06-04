@@ -569,14 +569,18 @@ async function handleJoinSession(ws, client, msg) {
   const session = sessions.get(msg.inviteCode);
   if (!session) { sendError(ws, 'NOT_FOUND', `Session not found: ${msg.inviteCode}`); return; }
 
-  // Reconnect: kick zombie by userId (authenticated users) OR by stale wsLastSeen (anonymous users).
-  if (msg.userId && !msg.isBot) {
+  // Reconnect: kick zombie by userId OR reconnectToken. Handles both authenticated users and
+  // anonymous users whose old TCP connection is still open (no FIN/RST received by server yet).
+  if (!msg.isBot) {
     for (const [, existingPlayer] of session.players) {
-      if (existingPlayer.userId !== msg.userId) continue;
       if (existingPlayer.ws === ws) continue;
+      const matchById    = msg.userId         && existingPlayer.userId         === msg.userId;
+      const matchByToken = msg.reconnectToken && existingPlayer.reconnectToken === msg.reconnectToken;
+      if (!matchById && !matchByToken) continue;
       const oldWs = existingPlayer.ws;
       const oldClient = clients.get(oldWs);
-      log('Session', `Reconnect: closing zombie ws for userId=${msg.userId} (old playerId=${existingPlayer.playerId})`);
+      const reason = matchById ? `userId=${msg.userId}` : `token=${msg.reconnectToken}`;
+      log('Session', `Reconnect: kicking zombie by ${reason} (old playerId=${existingPlayer.playerId})`);
       if (oldClient) leaveSession(oldWs, oldClient);
       wsLastSeen.delete(oldWs);
       clients.delete(oldWs);
@@ -585,8 +589,7 @@ async function handleJoinSession(ws, client, msg) {
     }
   }
 
-  // For anonymous users (no userId) remove any stale zombie connections in this session.
-  // Handles the internet-drop case where TCP didn't close cleanly and the old WS still appears OPEN.
+  // Belt-and-suspenders: also remove stale connections that missed the token/userId check.
   if (!msg.isBot) kickStaleSessionPlayers(session, ws);
 
   if (session.players.size >= 25) { sendError(ws, 'SESSION_FULL', 'Max 25 players'); return; }
@@ -610,6 +613,7 @@ async function handleJoinSession(ws, client, msg) {
 
   const player = {
     playerId: client.playerId, userId: msg.userId || null,
+    reconnectToken: msg.reconnectToken || null,
     userName: msg.userName || `Designer ${client.playerId}`, role,
     color: pickColor(session), avatarUrl: msg.avatarUrl || '',
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
