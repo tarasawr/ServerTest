@@ -212,6 +212,35 @@ let testCoordination = { phase: 'idle' };  // Test coordination state (GET/POST 
 // Regular clients send Move ~100ms and Ping every 10s, so legitimate connections are always fresh.
 const ZOMBIE_THRESHOLD_MS = 20_000;
 
+// When the last human disconnects (e.g. lost connection), keep the session alive for this long
+// so a reconnecting owner rejoins the same session instead of getting NOT_FOUND and a fresh slot.
+const SESSION_GRACE_MS = 30_000;
+
+function deleteSession(session) {
+  if (session.teardownTimer) { clearTimeout(session.teardownTimer); session.teardownTimer = null; }
+  kickSessionBots(session);
+  sessions.delete(session.inviteCode);
+  if (session.projectId) projectIndex.delete(session.projectId);
+}
+
+function cancelSessionTeardown(session) {
+  if (!session.teardownTimer) return;
+  clearTimeout(session.teardownTimer);
+  session.teardownTimer = null;
+  log('Session', `Teardown cancelled for ${session.id} (someone rejoined)`);
+}
+
+function scheduleSessionTeardown(session) {
+  if (session.teardownTimer) return;
+  session.teardownTimer = setTimeout(() => {
+    session.teardownTimer = null;
+    if (hasHumanPlayers(session)) return;
+    deleteSession(session);
+    log('Session', `${session.id} torn down after ${SESSION_GRACE_MS / 1000}s grace (no human rejoined)`);
+  }, SESSION_GRACE_MS);
+  log('Session', `${session.id} empty of humans — teardown scheduled in ${SESSION_GRACE_MS / 1000}s`);
+}
+
 // Kick all stale (zombie) players in a session except the given excludeWs.
 // Called on new JoinSession to clean up internet-drop zombies before adding the rejoining player.
 function kickStaleSessionPlayers(session, excludeWs) {
@@ -569,6 +598,8 @@ async function handleJoinSession(ws, client, msg) {
   const session = sessions.get(msg.inviteCode);
   if (!session) { sendError(ws, 'NOT_FOUND', `Session not found: ${msg.inviteCode}`); return; }
 
+  cancelSessionTeardown(session);
+
   // Reconnect: kick every zombie matching this user by userId OR reconnectToken. Handles both
   // authenticated users and anonymous users whose old TCP connection is still open (no FIN/RST yet).
   // Both keys must be non-empty to match — guards against matching all token-less players together.
@@ -686,23 +717,19 @@ function leaveSession(ws, client) {
 
   session.players.delete(client.playerId);
 
-  // If the last human left, kick all bots AND fully tear down the session.
-  // Bots' subsequent ws-close → leaveSession() will be a no-op (session already gone).
+  // If the last human left, keep the session alive for a grace period so a reconnecting
+  // owner rejoins the same session instead of getting NOT_FOUND. Teardown is deferred.
   if (!client.isBot && !hasHumanPlayers(session)) {
-    const botCount = session.players.size;
-    kickSessionBots(session);
-    sessions.delete(session.inviteCode);
-    if (session.projectId) projectIndex.delete(session.projectId);
-    log('Session', `${session.id} torn down (last human left, kicked ${botCount} bot(s), cache cleared)`);
+    scheduleSessionTeardown(session);
+    log('Session', `${session.id} last human left — grace teardown pending`);
     return;
   }
 
   if (client.playerId === session.ownerId) {
     if (session.players.size === 0) {
-      // No players left → delete session
-      sessions.delete(session.inviteCode);
-      if (session.projectId) projectIndex.delete(session.projectId);
-      log('Session', `${session.id} closed (owner left, no players remaining)`);
+      // No players left → defer teardown (reconnect grace)
+      scheduleSessionTeardown(session);
+      log('Session', `${session.id} owner left, no players — grace teardown pending`);
     } else {
       // Transfer ownership to next player
       const nextPlayer = session.players.values().next().value;
