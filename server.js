@@ -717,44 +717,39 @@ function leaveSession(ws, client) {
 
   session.players.delete(client.playerId);
 
-  // If the last human left, keep the session alive for a grace period so a reconnecting
-  // owner rejoins the same session instead of getting NOT_FOUND. Teardown is deferred.
-  if (!client.isBot && !hasHumanPlayers(session)) {
-    scheduleSessionTeardown(session);
-    log('Session', `${session.id} last human left — grace teardown pending`);
+  // Always remove the leaving player from everyone else immediately: their avatar disappears
+  // and they drop out of presence. On reconnect they re-appear via the normal join broadcast.
+  broadcastToSession(session, ws, { type: 'PlayerLeft', playerId: client.playerId });
+  log('Session', `Player ${client.playerId} left ${session.id} (total: ${session.players.size})`);
+
+  // Legacy session has no reconnect grace — drop it once empty.
+  if (session.inviteCode === LEGACY_INVITE) {
+    if (session.players.size === 0) {
+      sessions.delete(LEGACY_INVITE);
+      if (session.projectId) projectIndex.delete(session.projectId);
+      log('Legacy', 'Session removed (empty)');
+    }
     return;
   }
 
-  if (client.playerId === session.ownerId) {
-    if (session.players.size === 0) {
-      // No players left → defer teardown (reconnect grace)
-      scheduleSessionTeardown(session);
-      log('Session', `${session.id} owner left, no players — grace teardown pending`);
-    } else {
-      // Transfer ownership to next player
-      const nextPlayer = session.players.values().next().value;
-      session.ownerId = nextPlayer.playerId;
-      nextPlayer.role = 'owner';
-
-      // Notify all remaining players
-      broadcastToSession(session, null, {
-        type: 'OwnerChanged',
-        newOwnerId: nextPlayer.playerId,
-        reason: 'owner_left'
-      });
-
-      log('Session', `${session.id} ownership transferred to player ${nextPlayer.playerId} (total: ${session.players.size})`);
-    }
-  } else {
-    broadcastToSession(session, ws, { type: 'PlayerLeft', playerId: client.playerId });
-    log('Session', `Player ${client.playerId} left ${session.id} (total: ${session.players.size})`);
+  // No humans left → keep the session alive for the grace period so a reconnecting player
+  // rejoins the same session instead of getting NOT_FOUND. Teardown is deferred.
+  if (!hasHumanPlayers(session)) {
+    scheduleSessionTeardown(session);
+    return;
   }
 
-  // Clean up empty legacy session
-  if (session.inviteCode === LEGACY_INVITE && session.players.size === 0) {
-    sessions.delete(LEGACY_INVITE);
-    if (session.projectId) projectIndex.delete(session.projectId);
-    log('Legacy', 'Session removed (empty)');
+  // Owner left but others remain → transfer ownership to the next player.
+  if (client.playerId === session.ownerId) {
+    const nextPlayer = session.players.values().next().value;
+    session.ownerId = nextPlayer.playerId;
+    nextPlayer.role = 'owner';
+    broadcastToSession(session, null, {
+      type: 'OwnerChanged',
+      newOwnerId: nextPlayer.playerId,
+      reason: 'owner_left'
+    });
+    log('Session', `${session.id} ownership transferred to player ${nextPlayer.playerId}`);
   }
 }
 
