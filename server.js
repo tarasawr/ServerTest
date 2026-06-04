@@ -378,6 +378,15 @@ function sendSessionStateTo(session, ws, role) {
     });
   }
 
+  const seenUserIds = new Set();
+  for (const p of presence) {
+    log('Presence', `  → playerId=${p.playerId} userId=${p.userId} name=${p.userName}`);
+    if (p.userId && seenUserIds.has(p.userId))
+      log('Presence', `  ⚠ DUPLICATE userId=${p.userId} in presence (different playerId) — фантом!`);
+    if (p.userId) seenUserIds.add(p.userId);
+  }
+  log('Presence', `SessionState → player ${client.playerId}: presence size=${presence.length}`);
+
   ensureSelectionMaps(session);
   const selections = [];
   for (const [targetId, playerIds] of session.selections)
