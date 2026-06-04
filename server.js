@@ -205,7 +205,48 @@ let nextPlayerId = 1;
 const sessions = new Map();  // inviteCode -> Session
 const projectIndex = new Map();  // projectId -> inviteCode (only for sessions with non-empty projectId)
 const clients = new Map();   // WebSocket -> ClientState
+const wsLastSeen = new Map(); // WebSocket -> timestamp of last received message
 let testCoordination = { phase: 'idle' };  // Test coordination state (GET/POST /test)
+
+// After 20s (2× ping interval) with no message, a connection is considered a zombie.
+// Regular clients send Move ~100ms and Ping every 10s, so legitimate connections are always fresh.
+const ZOMBIE_THRESHOLD_MS = 20_000;
+
+// Kick all stale (zombie) players in a session except the given excludeWs.
+// Called on new JoinSession to clean up internet-drop zombies before adding the rejoining player.
+function kickStaleSessionPlayers(session, excludeWs) {
+  const now = Date.now();
+  const toKick = [];
+  for (const [, p] of session.players) {
+    if (p.ws === excludeWs) continue;
+    const last = wsLastSeen.get(p.ws) ?? 0;
+    if (now - last > ZOMBIE_THRESHOLD_MS)
+      toKick.push({ ws: p.ws, playerId: p.playerId, idleSec: Math.round((now - last) / 1000) });
+  }
+  for (const { ws: deadWs, playerId, idleSec } of toKick) {
+    const c = clients.get(deadWs);
+    log('Session', `Kicking zombie player ${playerId} (no message for ${idleSec}s)`);
+    if (c) leaveSession(deadWs, c);
+    wsLastSeen.delete(deadWs);
+    clients.delete(deadWs);
+    try { deadWs.terminate(); } catch (e) {}
+  }
+}
+
+// Periodic sweep — belt-and-suspenders cleanup when no new joins trigger kickStaleSessionPlayers.
+setInterval(() => {
+  const now = Date.now();
+  for (const [ws, t] of [...wsLastSeen]) {
+    if (now - t <= ZOMBIE_THRESHOLD_MS) continue;
+    const client = clients.get(ws);
+    if (!client) { wsLastSeen.delete(ws); continue; }
+    log('Sweep', `Closing stale ws for player ${client.playerId} (${Math.round((now - t) / 1000)}s idle)`);
+    wsLastSeen.delete(ws);
+    if (client.sessionId) leaveSession(ws, client);
+    clients.delete(ws);
+    try { ws.terminate(); } catch (e) {}
+  }
+}, 5_000);
 
 // --- Player colors (10 distinct colors from design) ---
 
@@ -528,8 +569,7 @@ async function handleJoinSession(ws, client, msg) {
   const session = sessions.get(msg.inviteCode);
   if (!session) { sendError(ws, 'NOT_FOUND', `Session not found: ${msg.inviteCode}`); return; }
 
-  // Reconnect: if the same userId is already in the session under a different ws (zombie),
-  // kick the old connection so the new join is a clean rejoin. Bots have no userId.
+  // Reconnect: kick zombie by userId (authenticated users) OR by stale wsLastSeen (anonymous users).
   if (msg.userId && !msg.isBot) {
     for (const [, existingPlayer] of session.players) {
       if (existingPlayer.userId !== msg.userId) continue;
@@ -538,10 +578,16 @@ async function handleJoinSession(ws, client, msg) {
       const oldClient = clients.get(oldWs);
       log('Session', `Reconnect: closing zombie ws for userId=${msg.userId} (old playerId=${existingPlayer.playerId})`);
       if (oldClient) leaveSession(oldWs, oldClient);
-      try { oldWs.close(4000, 'replaced by reconnect'); } catch (e) {}
+      wsLastSeen.delete(oldWs);
+      clients.delete(oldWs);
+      try { oldWs.terminate(); } catch (e) {}
       break;
     }
   }
+
+  // For anonymous users (no userId) remove any stale zombie connections in this session.
+  // Handles the internet-drop case where TCP didn't close cleanly and the old WS still appears OPEN.
+  if (!msg.isBot) kickStaleSessionPlayers(session, ws);
 
   if (session.players.size >= 25) { sendError(ws, 'SESSION_FULL', 'Max 25 players'); return; }
 
@@ -1236,9 +1282,11 @@ function sendPossiblyChunked(ws, obj) {
 wss.on('connection', (ws) => {
   const playerId = nextPlayerId++;
   clients.set(ws, { playerId, sessionId: null, ws });
+  wsLastSeen.set(ws, Date.now());
   log('Connect', `Player ${playerId} connected (total: ${clients.size})`);
 
   ws.on('message', (raw) => {
+    wsLastSeen.set(ws, Date.now());
     let msg;
     try { msg = JSON.parse(raw); } catch (e) {
       log('Error', `Player ${clients.get(ws)?.playerId} sent invalid JSON: ${String(raw).slice(0, 100)}`);
@@ -1298,6 +1346,7 @@ wss.on('connection', (ws) => {
     const reasonStr = reason ? reason.toString() : 'no reason';
     if (client?.sessionId) leaveSession(ws, client);
     clients.delete(ws);
+    wsLastSeen.delete(ws);
     cleanupChunkBuffers(ws);
     log('Disconnect', `Player ${client?.playerId} disconnected (code=${code || 'none'}, reason="${reasonStr}", total: ${clients.size})`);
   });
