@@ -375,7 +375,8 @@ function sendSessionStateTo(session, ws, role) {
       position: p.position, rotation: p.rotation,
       viewMode: p.viewMode || '3d',
       isMobile: !!p.isMobile,
-      levelIndex: p.levelIndex || 0
+      levelIndex: p.levelIndex || 0,
+      levelUniqueId: p.levelUniqueId || ''
     });
   }
 
@@ -460,7 +461,7 @@ function getOrCreateLegacySession(ws, client) {
     playerId: client.playerId, userId: null,
     userName: `Designer ${client.playerId}`, role: 'owner',
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
-    viewMode: '3d', isMobile: false, levelIndex: 0, ws,
+    viewMode: '3d', isMobile: false, levelIndex: 0, levelUniqueId: '', ws,
     pendingJoinedBroadcast: true
   };
   session.players.set(client.playerId, player);
@@ -581,7 +582,7 @@ async function handleCreateSession(ws, client, msg) {
     userName: msg.userName || `Designer ${client.playerId}`, role: 'owner',
     color: pickColor(session), avatarUrl: msg.avatarUrl || '',
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
-    viewMode: '3d', isMobile: !!msg.isMobile, levelIndex: 0, ws
+    viewMode: '3d', isMobile: !!msg.isMobile, levelIndex: 0, levelUniqueId: '', ws
   };
 
   session.players.set(client.playerId, player);
@@ -665,7 +666,7 @@ async function handleJoinSession(ws, client, msg) {
     userName: msg.userName || `Designer ${client.playerId}`, role,
     color: pickColor(session), avatarUrl: msg.avatarUrl || '',
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
-    viewMode: '3d', isMobile: !!msg.isMobile, levelIndex: 0, ws,
+    viewMode: '3d', isMobile: !!msg.isMobile, levelIndex: 0, levelUniqueId: '', ws,
     pendingJoinedBroadcast: true
   };
 
@@ -774,7 +775,8 @@ function handleMove(ws, client, msg) {
     player.position = msg.position || player.position;
     player.rotation = msg.rotation || player.rotation;
     if (msg.viewMode) player.viewMode = msg.viewMode;
-    if (msg.levelIndex !== undefined) player.levelIndex = msg.levelIndex;
+    if (typeof msg.levelIndex === 'number') player.levelIndex = msg.levelIndex;
+    if (typeof msg.levelUniqueId === 'string') player.levelUniqueId = msg.levelUniqueId;
   }
 
   // Defer PlayerJoined broadcast until the new player reports a real (non-zero) position.
@@ -790,7 +792,8 @@ function handleMove(ws, client, msg) {
     type: 'PlayerMoved', playerId: client.playerId,
     position: msg.position, rotation: msg.rotation,
     viewMode: msg.viewMode || '3d',
-    levelIndex: player ? (player.levelIndex || 0) : 0
+    levelIndex: player ? (player.levelIndex || 0) : 0,
+    levelUniqueId: player ? (player.levelUniqueId || '') : ''
   });
 }
 
@@ -815,7 +818,8 @@ function flushDeferredJoin(session, player, reason) {
     position: player.position, rotation: player.rotation,
     viewMode: player.viewMode || '3d',
     isMobile: !!player.isMobile,
-    levelIndex: player.levelIndex || 0
+    levelIndex: player.levelIndex || 0,
+    levelUniqueId: player.levelUniqueId || ''
   });
   log('Session', `Player ${player.playerId} PlayerJoined broadcast (${reason})`);
 }
