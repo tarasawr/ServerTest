@@ -9,6 +9,9 @@ let BOT_COUNT = 0; // bots auto-spawned per session (0 to disable)
 let BOT_VIEW_MODE = 'random'; // 'random', '2d', '3d', 'panorama' — forced view mode for bots
 let BOT_REJOIN = true; // whether bots disconnect after session time and reconnect
 let BOT_MOBILE_MODE = 'all'; // 'all' (every bot is mobile) or 'random' (50/50 mobile/desktop)
+let BOT_FLOOR_MODE = 'random'; // 'random' = random starting floor, 'first' = always floor 0
+let BOT_FLOOR_SWITCH_CHANCE = 0.0; // per-tick probability of switching floor (0 = never)
+let BOT_BEHAVIOR_CHANGE = true; // whether bots randomly switch view mode
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -62,6 +65,9 @@ const server = http.createServer((req, res) => {
     const sessionMax = url.searchParams.get('sessionMax');
     const offlineMin = url.searchParams.get('offlineMin');
     const offlineMax = url.searchParams.get('offlineMax');
+    const floorMode = url.searchParams.get('floorMode');
+    const floorSwitch = url.searchParams.get('floorSwitch');
+    const behaviorChange = url.searchParams.get('behaviorChange');
     const reset = url.searchParams.get('reset');
 
     if (count !== null) {
@@ -108,6 +114,18 @@ const server = http.createServer((req, res) => {
       BOT_MAX_OFFLINE_SEC = v;
       log('Bots', `Bot offlineMax set to ${BOT_MAX_OFFLINE_SEC}s`);
     }
+    if (floorMode !== null && ['random', 'first'].includes(floorMode)) {
+      BOT_FLOOR_MODE = floorMode;
+      log('Bots', `Bot floor mode set to ${BOT_FLOOR_MODE}`);
+    }
+    if (floorSwitch !== null) {
+      BOT_FLOOR_SWITCH_CHANCE = Math.max(0, Math.min(1, parseFloat(floorSwitch) || 0));
+      log('Bots', `Bot floor switch chance set to ${BOT_FLOOR_SWITCH_CHANCE}`);
+    }
+    if (behaviorChange !== null) {
+      BOT_BEHAVIOR_CHANGE = !(behaviorChange === '0' || behaviorChange === 'false');
+      log('Bots', `Bot behavior change set to ${BOT_BEHAVIOR_CHANGE}`);
+    }
 
     if (reset !== null && reset !== '0' && reset !== 'false') {
       const managerCodes = Array.from(sessionBotManagers.keys());
@@ -141,7 +159,10 @@ const server = http.createServer((req, res) => {
       sessionMin: BOT_MIN_ONLINE_SEC,
       sessionMax: BOT_MAX_ONLINE_SEC,
       offlineMin: BOT_MIN_OFFLINE_SEC,
-      offlineMax: BOT_MAX_OFFLINE_SEC
+      offlineMax: BOT_MAX_OFFLINE_SEC,
+      floorMode: BOT_FLOOR_MODE,
+      floorSwitch: BOT_FLOOR_SWITCH_CHANCE,
+      behaviorChange: BOT_BEHAVIOR_CHANGE
     }));
     return;
   }
@@ -1469,6 +1490,32 @@ function parseRoomsFromXml(xml) {
   return rooms;
 }
 
+// Splits the project XML into per-level segments and returns { uniqueId, rooms } for each.
+// Levels are never nested inside levels, so segmenting on each <Level ...> open tag is safe.
+function parseLevelsFromXml(xml) {
+  const levels = [];
+  if (!xml) return levels;
+
+  const levelRe = /<Level\b([^>]*)>/g;
+  const starts = [];
+  let m;
+  while ((m = levelRe.exec(xml)) !== null)
+    starts.push({ attrs: m[1], openIndex: m.index, contentStart: levelRe.lastIndex });
+
+  for (let i = 0; i < starts.length; i++) {
+    const segmentEnd = i + 1 < starts.length ? starts[i + 1].openIndex : xml.length;
+    const segment = xml.slice(starts[i].contentStart, segmentEnd);
+    const uidMatch = /UniqueId="([^"]*)"/.exec(starts[i].attrs);
+    const uniqueId = uidMatch ? uidMatch[1] : '';
+
+    const allRooms = parseRoomsFromXml(segment);
+    const indoor = filterIndoorRooms(allRooms);
+    levels.push({ uniqueId, rooms: indoor.length > 0 ? indoor : allRooms });
+  }
+
+  return levels;
+}
+
 function ptInPoly(px, pz, poly) {
   let inside = false;
   for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
@@ -1562,12 +1609,10 @@ function spawnSessionBots(inviteCode, projectXml) {
   if (BOT_COUNT <= 0) return;
   if (sessionBotManagers.has(inviteCode)) return; // already managing
 
-  const allRooms = parseRoomsFromXml(projectXml || '');
-  log('Bots', `ALL ${allRooms.length} rooms:`);
-  for (let i = 0; i < allRooms.length; i++) { const c = polyCenter(allRooms[i]); log('Bots', `  [${i}] center=(${c.x.toFixed(1)}, ${c.z.toFixed(1)}), area=${polyArea(allRooms[i]).toFixed(0)}`); }
-  const rooms = filterIndoorRooms(allRooms);
-  log('Bots', `${rooms.length} indoor rooms after filter, managing ${BOT_COUNT} bot slots`);
-  for (const r of rooms) { const c = polyCenter(r); log('Bots', `  Indoor: center=(${c.x.toFixed(1)}, ${c.z.toFixed(1)}), area=${polyArea(r).toFixed(0)}`); }
+  const levels = parseLevelsFromXml(projectXml || '');
+  log('Bots', `${levels.length} levels parsed, managing ${BOT_COUNT} bot slots (floorMode=${BOT_FLOOR_MODE})`);
+  for (let i = 0; i < levels.length; i++)
+    log('Bots', `  Level[${i}] uid=${(levels[i].uniqueId || '?').slice(-6)} rooms=${levels[i].rooms.length}`);
 
   const manager = { slots: [], managerTimer: null, stopped: false };
   sessionBotManagers.set(inviteCode, manager);
@@ -1578,7 +1623,7 @@ function spawnSessionBots(inviteCode, projectXml) {
     manager.slots.push(slot);
     // Stagger initial connections
     const initialDelay = i * 2000 + Math.random() * 3000;
-    slot.reconnectTimer = setTimeout(() => connectBot(slot, inviteCode, rooms), initialDelay);
+    slot.reconnectTimer = setTimeout(() => connectBot(slot, inviteCode, levels), initialDelay);
   }
 
   // Periodic check: stop manager if session gone or no humans
@@ -1590,7 +1635,13 @@ function spawnSessionBots(inviteCode, projectXml) {
   }, 5000);
 }
 
-function connectBot(slot, inviteCode, rooms) {
+function pickFloorIndex(levels, slotIndex) {
+  if (levels.length === 0) return 0;
+  if (BOT_FLOOR_MODE === 'first') return 0;
+  return Math.floor(Math.random() * levels.length);
+}
+
+function connectBot(slot, inviteCode, levels) {
   if (slot.botWs) return; // already connected
 
   const session = sessions.get(inviteCode);
@@ -1600,7 +1651,11 @@ function connectBot(slot, inviteCode, rooms) {
   const botWs = new WebSocket(`ws://localhost:${PORT}`);
   slot.botWs = botWs;
 
-  // Rooms already filtered to indoor in spawnSessionBots
+  // Levels already parsed (uniqueId + indoor rooms) in spawnSessionBots
+  let floorIndex = pickFloorIndex(levels, slot.index);
+  let currentLevel = levels.length > 0 ? levels[floorIndex] : { uniqueId: '', rooms: [] };
+  let levelUniqueId = currentLevel.uniqueId;
+  let rooms = currentLevel.rooms;
   let currentRoom = rooms.length > 0 ? rooms[slot.index % rooms.length] : null;
   const spawn = currentRoom ? randInPoly(currentRoom) : { x: 0, z: 0 };
   let x = spawn.x, y = 0, z = spawn.z;
@@ -1640,15 +1695,20 @@ function connectBot(slot, inviteCode, rooms) {
 
     if (msg.type === 'SessionState') {
       slot.playerId = msg.playerId;
-      const freshAllRooms = parseRoomsFromXml(msg.projectXml || '');
-      const freshRooms = filterIndoorRooms(freshAllRooms);
-      if (freshRooms.length > 0) {
-        rooms = freshRooms;
-        currentRoom = rooms[slot.index % rooms.length];
-        const respawn = randInPoly(currentRoom);
-        x = respawn.x; z = respawn.z;
+      const freshLevels = parseLevelsFromXml(msg.projectXml || '');
+      if (freshLevels.length > 0) {
+        levels = freshLevels;
+        floorIndex = pickFloorIndex(levels, slot.index);
+        currentLevel = levels[floorIndex];
+        levelUniqueId = currentLevel.uniqueId;
+        rooms = currentLevel.rooms;
+        if (rooms.length > 0) {
+          currentRoom = rooms[slot.index % rooms.length];
+          const respawn = randInPoly(currentRoom);
+          x = respawn.x; z = respawn.z;
+        }
       }
-      log('Bots', `${name} connected at (${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})`);
+      log('Bots', `${name} connected on floor ${floorIndex} (uid=${(levelUniqueId || '?').slice(-6)}) at (${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})`);
 
       slot.moveTimer = setInterval(() => {
         if (botWs.readyState !== WebSocket.OPEN) { clearInterval(slot.moveTimer); return; }
@@ -1666,8 +1726,19 @@ function connectBot(slot, inviteCode, rooms) {
             slot.walkTarget = null;
             if (cb) cb();
           }
-          botWs.send(JSON.stringify({ type: 'Move', position: { x, y, z }, rotation: { x: 0, y: rotY, z: 0 }, viewMode, levelIndex: 0 }));
+          botWs.send(JSON.stringify({ type: 'Move', position: { x, y, z }, rotation: { x: 0, y: rotY, z: 0 }, viewMode, levelIndex: floorIndex, levelUniqueId }));
           return;
+        }
+
+        if (levels.length > 1 && BOT_FLOOR_SWITCH_CHANCE > 0 && Math.random() < BOT_FLOOR_SWITCH_CHANCE) {
+          floorIndex = (floorIndex + 1 + Math.floor(Math.random() * (levels.length - 1))) % levels.length;
+          currentLevel = levels[floorIndex];
+          levelUniqueId = currentLevel.uniqueId;
+          rooms = currentLevel.rooms;
+          currentRoom = rooms.length > 0 ? rooms[Math.floor(Math.random() * rooms.length)] : null;
+          if (currentRoom) { const p = randInPoly(currentRoom); x = p.x; z = p.z; }
+          slot.walkTarget = null;
+          log('Bots', `${name} switched to floor ${floorIndex} (uid=${(levelUniqueId || '?').slice(-6)})`);
         }
 
         if (!paused && Math.random() < BOT_PAUSE_CHANCE) {
@@ -1704,7 +1775,7 @@ function connectBot(slot, inviteCode, rooms) {
           rotY = Math.atan2(dirX, dirZ) * 180 / Math.PI;
         }
 
-        if (BOT_VIEW_MODE === 'random' && Math.random() < BOT_VIEW_SWITCH_CHANCE) {
+        if (BOT_BEHAVIOR_CHANGE && BOT_VIEW_MODE === 'random' && Math.random() < BOT_VIEW_SWITCH_CHANCE) {
           viewMode = viewMode === '3d' ? '2d' : '3d';
           log('Bots', `${name} switched to ${viewMode}`);
         } else if (BOT_VIEW_MODE !== 'random') {
@@ -1728,7 +1799,7 @@ function connectBot(slot, inviteCode, rooms) {
         const sendZ = useTap ? tapZ : z;
         const sendY = viewMode === '2d' ? 0 : y;
         const sendRotY = viewMode === '2d' ? 0 : rotY;
-        botWs.send(JSON.stringify({ type: 'Move', position: { x: sendX, y: sendY, z: sendZ }, rotation: { x: 0, y: sendRotY, z: 0 }, viewMode, levelIndex: 0 }));
+        botWs.send(JSON.stringify({ type: 'Move', position: { x: sendX, y: sendY, z: sendZ }, rotation: { x: 0, y: sendRotY, z: 0 }, viewMode, levelIndex: floorIndex, levelUniqueId }));
       }, BOT_MOVE_INTERVAL);
 
       if (BOT_REJOIN) {
@@ -1738,7 +1809,7 @@ function connectBot(slot, inviteCode, rooms) {
             log('Bots', `${name} disconnecting (was online ${(onlineTime / 1000).toFixed(0)}s)`);
             disconnectBot(slot);
             const offlineTime = randBetween(BOT_MIN_OFFLINE_SEC, BOT_MAX_OFFLINE_SEC) * 1000;
-            slot.reconnectTimer = setTimeout(() => connectBot(slot, inviteCode, rooms), offlineTime);
+            slot.reconnectTimer = setTimeout(() => connectBot(slot, inviteCode, levels), offlineTime);
           }
         }, onlineTime);
       }
