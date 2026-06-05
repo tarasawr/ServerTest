@@ -374,7 +374,8 @@ function sendSessionStateTo(session, ws, role) {
       role: p.role, color: p.color, avatarUrl: p.avatarUrl || '',
       position: p.position, rotation: p.rotation,
       viewMode: p.viewMode || '3d',
-      isMobile: !!p.isMobile
+      isMobile: !!p.isMobile,
+      levelIndex: p.levelIndex || 0
     });
   }
 
@@ -459,7 +460,7 @@ function getOrCreateLegacySession(ws, client) {
     playerId: client.playerId, userId: null,
     userName: `Designer ${client.playerId}`, role: 'owner',
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
-    viewMode: '3d', isMobile: false, ws,
+    viewMode: '3d', isMobile: false, levelIndex: 0, ws,
     pendingJoinedBroadcast: true
   };
   session.players.set(client.playerId, player);
@@ -580,7 +581,7 @@ async function handleCreateSession(ws, client, msg) {
     userName: msg.userName || `Designer ${client.playerId}`, role: 'owner',
     color: pickColor(session), avatarUrl: msg.avatarUrl || '',
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
-    viewMode: '3d', isMobile: !!msg.isMobile, ws
+    viewMode: '3d', isMobile: !!msg.isMobile, levelIndex: 0, ws
   };
 
   session.players.set(client.playerId, player);
@@ -664,7 +665,7 @@ async function handleJoinSession(ws, client, msg) {
     userName: msg.userName || `Designer ${client.playerId}`, role,
     color: pickColor(session), avatarUrl: msg.avatarUrl || '',
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
-    viewMode: '3d', isMobile: !!msg.isMobile, ws,
+    viewMode: '3d', isMobile: !!msg.isMobile, levelIndex: 0, ws,
     pendingJoinedBroadcast: true
   };
 
@@ -773,6 +774,7 @@ function handleMove(ws, client, msg) {
     player.position = msg.position || player.position;
     player.rotation = msg.rotation || player.rotation;
     if (msg.viewMode) player.viewMode = msg.viewMode;
+    if (msg.levelIndex !== undefined) player.levelIndex = msg.levelIndex;
   }
 
   // Defer PlayerJoined broadcast until the new player reports a real (non-zero) position.
@@ -787,7 +789,8 @@ function handleMove(ws, client, msg) {
   broadcastToSession(session, ws, {
     type: 'PlayerMoved', playerId: client.playerId,
     position: msg.position, rotation: msg.rotation,
-    viewMode: msg.viewMode || '3d'
+    viewMode: msg.viewMode || '3d',
+    levelIndex: player ? (player.levelIndex || 0) : 0
   });
 }
 
@@ -811,7 +814,8 @@ function flushDeferredJoin(session, player, reason) {
     color: player.color, avatarUrl: player.avatarUrl || '',
     position: player.position, rotation: player.rotation,
     viewMode: player.viewMode || '3d',
-    isMobile: !!player.isMobile
+    isMobile: !!player.isMobile,
+    levelIndex: player.levelIndex || 0
   });
   log('Session', `Player ${player.playerId} PlayerJoined broadcast (${reason})`);
 }
@@ -1658,7 +1662,7 @@ function connectBot(slot, inviteCode, rooms) {
             slot.walkTarget = null;
             if (cb) cb();
           }
-          botWs.send(JSON.stringify({ type: 'Move', position: { x, y, z }, rotation: { x: 0, y: rotY, z: 0 }, viewMode }));
+          botWs.send(JSON.stringify({ type: 'Move', position: { x, y, z }, rotation: { x: 0, y: rotY, z: 0 }, viewMode, levelIndex: 0 }));
           return;
         }
 
@@ -1720,7 +1724,7 @@ function connectBot(slot, inviteCode, rooms) {
         const sendZ = useTap ? tapZ : z;
         const sendY = viewMode === '2d' ? 0 : y;
         const sendRotY = viewMode === '2d' ? 0 : rotY;
-        botWs.send(JSON.stringify({ type: 'Move', position: { x: sendX, y: sendY, z: sendZ }, rotation: { x: 0, y: sendRotY, z: 0 }, viewMode }));
+        botWs.send(JSON.stringify({ type: 'Move', position: { x: sendX, y: sendY, z: sendZ }, rotation: { x: 0, y: sendRotY, z: 0 }, viewMode, levelIndex: 0 }));
       }, BOT_MOVE_INTERVAL);
 
       if (BOT_REJOIN) {
