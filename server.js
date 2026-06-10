@@ -1430,7 +1430,40 @@ wss.on('connection', (ws) => {
 
 // --- Inline bots ---
 
-const BOT_NAMES = ['Leonid', 'Danila', 'Oksana'];
+// Realistic full names (first + last) across different locales — native scripts where
+// the app ships a font (Cyrillic/CJK/Arabic/Hebrew/Devanagari), Latin transliteration
+// otherwise. Shuffled per session so each bot slot gets a stable, distinct name.
+const BOT_NAMES = [
+  'Lucas Müller',        // German
+  'Sophie Dubois',       // French
+  'Marco Rossi',         // Italian
+  'Carlos García',       // Spanish
+  'Emma Johansson',      // Swedish
+  'Olivia Smith',        // English (US)
+  'James Wilson',        // English (UK)
+  'Anna Kowalska',       // Polish
+  'Mehmet Yılmaz',       // Turkish
+  'João Silva',          // Portuguese (Brazil)
+  'Priya Sharma',        // Indian (Latin)
+  "Liam O'Brien",        // Irish
+  'Ingrid Hansen',       // Norwegian
+  'Леонид Воронцов',     // Russian
+  'Оксана Ткаченко',     // Ukrainian
+  '田中さくら',           // Japanese
+  '김민준',               // Korean
+  '王伟',                 // Chinese
+  'أحمد حسن',            // Arabic
+  'राज पटेल',            // Hindi
+  'דוד כהן',             // Hebrew
+];
+function shuffledBotNames() {
+  const arr = [...BOT_NAMES];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
 const BOT_AVATARS = [
   'https://i.pravatar.cc/150?img=1',
   'https://i.pravatar.cc/150?img=3',
@@ -1618,8 +1651,9 @@ function spawnSessionBots(inviteCode, projectXml) {
   sessionBotManagers.set(inviteCode, manager);
 
   const avatarPool = shuffledBotAvatars();
+  const namePool = shuffledBotNames();
   for (let i = 0; i < BOT_COUNT; i++) {
-    const slot = { index: i, botWs: null, moveTimer: null, reconnectTimer: null, avatarUrl: avatarPool[i % avatarPool.length], walkTarget: null, playerId: null };
+    const slot = { index: i, botWs: null, moveTimer: null, reconnectTimer: null, avatarUrl: avatarPool[i % avatarPool.length], userName: namePool[i % namePool.length], walkTarget: null, playerId: null };
     manager.slots.push(slot);
     // Stagger initial connections
     const initialDelay = i * 2000 + Math.random() * 3000;
@@ -1647,7 +1681,7 @@ function connectBot(slot, inviteCode, levels) {
   const session = sessions.get(inviteCode);
   if (!session || !hasHumanPlayers(session)) return;
 
-  const name = BOT_NAMES[slot.index % BOT_NAMES.length];
+  const name = slot.userName || BOT_NAMES[slot.index % BOT_NAMES.length];
   const botWs = new WebSocket(`ws://localhost:${PORT}`);
   slot.botWs = botWs;
 
