@@ -301,16 +301,16 @@ setInterval(() => {
 // --- Player colors (10 distinct colors from design) ---
 
 const PLAYER_COLORS = [
-  '#8C5CF6', // purple
-  '#F04545', // red
-  '#FAD93D', // yellow
-  '#22C55E', // green
-  '#ED4A99', // magenta
-  '#737D8C', // slate gray
-  '#4285F4', // blue
-  '#F28D28', // orange
-  '#66BAE9', // light blue
-  '#99A626', // olive
+  '#F8ED15', // yellow
+  '#FFC935', // amber
+  '#F79009', // orange
+  '#F34439', // red
+  '#EF0AFF', // magenta
+  '#742AED', // purple
+  '#4C5FF0', // indigo
+  '#5AA9FF', // blue
+  '#7CD4FD', // light blue
+  '#4BD3CE', // teal
 ];
 
 function pickColor(session) {
