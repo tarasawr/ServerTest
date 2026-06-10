@@ -300,18 +300,9 @@ setInterval(() => {
 
 // --- Player colors (10 distinct colors from design) ---
 
-const PLAYER_COLORS = [
-  '#F8ED15', // yellow
-  '#FFC935', // amber
-  '#F79009', // orange
-  '#F34439', // red
-  '#EF0AFF', // magenta
-  '#742AED', // purple
-  '#4C5FF0', // indigo
-  '#5AA9FF', // blue
-  '#7CD4FD', // light blue
-  '#4BD3CE', // teal
-];
+// Палитра — единый источник в projects.js (она же хранится в project_users.color).
+// pickColor используется только для не-членов сессии (боты / аноним / сессии без projectId).
+const PLAYER_COLORS = projectsModule.PLAYER_COLORS;
 
 function pickColor(session) {
   const usedColors = new Set();
@@ -321,6 +312,20 @@ function pickColor(session) {
   const available = PLAYER_COLORS.filter(c => !usedColors.has(c));
   const pool = available.length > 0 ? available : PLAYER_COLORS;
   return pool[Math.floor(Math.random() * pool.length)];
+}
+
+// Цвет члена проекта берётся из БД (project_users.color) — единый источник, общий для
+// HTTP-карточек, sharing-попапов и WS-сессии. Боты/аноним/сессии без projectId — session-цвет.
+async function resolveMemberColor(session, msg) {
+  if (!msg.isBot && session.projectId && msg.userId) {
+    try {
+      const c = await projectsModule.getUserColor(session.projectId, msg.userId);
+      if (c) return c;
+    } catch (e) {
+      log('Session', `getUserColor failed for ${msg.userId}: ${e.message}`);
+    }
+  }
+  return pickColor(session);
 }
 
 // --- Helpers ---
@@ -601,7 +606,7 @@ async function handleCreateSession(ws, client, msg) {
   const player = {
     playerId: client.playerId, userId: msg.userId || null,
     userName: msg.userName || `Designer ${client.playerId}`, role: 'owner',
-    color: pickColor(session), avatarUrl: msg.avatarUrl || '',
+    color: await resolveMemberColor(session, msg), avatarUrl: msg.avatarUrl || '',
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
     viewMode: '3d', isMobile: !!msg.isMobile, levelIndex: 0, levelUniqueId: '', ws
   };
@@ -685,7 +690,7 @@ async function handleJoinSession(ws, client, msg) {
     playerId: client.playerId, userId: msg.userId || null,
     reconnectToken: msg.reconnectToken || null,
     userName: msg.userName || `Designer ${client.playerId}`, role,
-    color: pickColor(session), avatarUrl: msg.avatarUrl || '',
+    color: await resolveMemberColor(session, msg), avatarUrl: msg.avatarUrl || '',
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
     viewMode: '3d', isMobile: !!msg.isMobile, levelIndex: 0, levelUniqueId: '', ws,
     pendingJoinedBroadcast: true

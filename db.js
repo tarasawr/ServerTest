@@ -61,6 +61,8 @@ const INIT_SQL = `
 
   ALTER TABLE project_users ADD COLUMN IF NOT EXISTS is_invitation_pending BOOLEAN NOT NULL DEFAULT false;
 
+  ALTER TABLE project_users ADD COLUMN IF NOT EXISTS color TEXT NOT NULL DEFAULT '';
+
   CREATE INDEX IF NOT EXISTS project_users_user_idx ON project_users(user_id);
 `;
 
