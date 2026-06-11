@@ -510,23 +510,6 @@ async function handlePutProjectGlobalRole(req, res, projectId, sessions) {
   }
 }
 
-async function handlePutSync(req, res, projectId) {
-  try {
-    const r = await db.query(
-      'UPDATE projects SET last_sync_date = NOW() WHERE project_id = $1 RETURNING last_sync_date',
-      [projectId]
-    );
-    if (r.rowCount === 0) return jsonErr(res, 404, `Project ${projectId} not found`);
-
-    const lastSyncDate = isoDate(r.rows[0].last_sync_date);
-    log('Projects', `Sync date updated for project ${projectId}`);
-    jsonOk(res, { ok: true, lastSyncDate });
-  } catch (e) {
-    log('Projects', `ERROR handlePutSync: ${e.message}`);
-    jsonErr(res, 500, 'Internal error');
-  }
-}
-
 async function handleDeleteAllUsers(req, res, projectId) {
   try {
     const body = await readBody(req);
@@ -824,13 +807,6 @@ function handleRequest(req, res, url, sessions, projectIndex) {
   const projGlobalRoleM = p.match(/^\/projects\/([^\/]+)\/globalRole$/);
   if (projGlobalRoleM && req.method === 'PUT') {
     handlePutProjectGlobalRole(req, res, projGlobalRoleM[1], sessions);
-    return true;
-  }
-
-  // PUT /projects/:id/sync
-  const syncM = p.match(/^\/projects\/([^\/]+)\/sync$/);
-  if (syncM && req.method === 'PUT') {
-    handlePutSync(req, res, syncM[1]);
     return true;
   }
 
