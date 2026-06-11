@@ -1,7 +1,5 @@
 'use strict';
 
-const fs = require('fs');
-const path = require('path');
 const db = require('./db');
 
 // --- Projects database ---
@@ -14,73 +12,6 @@ const db = require('./db');
 // 'owner' / 'can_edit' / 'can_view' are explicit overrides.
 // 'no_access' is a soft-removed user: the row is kept (so re-join via the share
 // link can be rejected) but the user is hidden from every listing endpoint.
-
-// --- One-shot migration from legacy JSON storage ---
-
-const LEGACY_STORAGE_FILE = path.join(__dirname, 'projects-data.json');
-
-async function migrateFromJsonIfNeeded() {
-  if (!fs.existsSync(LEGACY_STORAGE_FILE)) return;
-
-  // Don't import if DB already has data — assume someone already migrated.
-  const { rows } = await db.query('SELECT COUNT(*)::int AS n FROM projects');
-  if (rows[0].n > 0) {
-    log('Migration', `Skipping JSON import — DB has ${rows[0].n} project(s)`);
-    return;
-  }
-
-  let arr;
-  try {
-    arr = JSON.parse(fs.readFileSync(LEGACY_STORAGE_FILE, 'utf8'));
-  } catch (e) {
-    log('Migration', `WARN: could not parse legacy JSON: ${e.message}`);
-    return;
-  }
-  if (!Array.isArray(arr) || arr.length === 0) return;
-
-  for (const p of arr) {
-    if (!p.projectId || !p.ownerUserId) continue;
-    try {
-      await db.transaction(async client => {
-        await client.query(
-          `INSERT INTO projects (project_id, owner_user_id, owner_name, project_title,
-                                 project_xml, global_role, last_sync_date)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           ON CONFLICT (project_id) DO NOTHING`,
-          [p.projectId, p.ownerUserId, p.ownerName || 'Unknown',
-           p.projectTitle || '', p.projectXml || '',
-           p.globalRole || 'can_view',
-           p.lastSyncDate ? new Date(p.lastSyncDate) : new Date()]
-        );
-        for (const u of (p.users || [])) {
-          if (!u.userId) continue;
-          await client.query(
-            `INSERT INTO project_users (project_id, user_id, name, avatar_url, role)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (project_id, user_id) DO NOTHING`,
-            [p.projectId, u.userId, u.name || 'Unknown', u.avatarUrl || '',
-             u.role === undefined ? null : u.role]
-          );
-        }
-      });
-    } catch (e) {
-      log('Migration', `WARN: failed to import project ${p.projectId}: ${e.message}`);
-    }
-  }
-
-  // Rename legacy file so we don't re-import on next restart.
-  try {
-    fs.renameSync(LEGACY_STORAGE_FILE, LEGACY_STORAGE_FILE + '.migrated-' + Date.now());
-  } catch (_) { /* keep going — migration succeeded even if rename failed */ }
-
-  log('Migration', `Imported ${arr.length} project(s) from legacy JSON`);
-}
-
-// Kick off migration after schema is ready. Don't block the module load —
-// individual handlers wait on db.ready() via db.query().
-db.ready().then(migrateFromJsonIfNeeded).catch(e => {
-  log('Migration', `WARN: migration check failed: ${e.message}`);
-});
 
 // --- Helpers ---
 
