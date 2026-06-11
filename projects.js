@@ -6,7 +6,8 @@ const db = require('./db');
 // Persisted in Postgres (Neon). Schema in db.js:
 //   projects(project_id, owner_user_id, owner_name, project_title, project_xml,
 //            global_role, last_sync_date)
-//   project_users(project_id, user_id, name, avatar_url, role, created_at)
+//   project_users(project_id, user_id, name, avatar_url, role, is_invitation_pending,
+//                 color, created_at)
 //
 // `role` is NULL when a user inherits the project-level global_role.
 // 'owner' / 'can_edit' / 'can_view' are explicit overrides.
