@@ -486,6 +486,7 @@ function getOrCreateLegacySession(ws, client) {
   const player = {
     playerId: client.playerId, userId: null,
     userName: `Designer ${client.playerId}`, role: 'owner',
+    color: pickColor(session), avatarUrl: '',
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
     viewMode: '3d', isMobile: false, levelIndex: 0, levelUniqueId: '', ws,
     pendingJoinedBroadcast: true
@@ -497,10 +498,13 @@ function getOrCreateLegacySession(ws, client) {
   for (const [, p] of session.players) {
     if (p.playerId !== client.playerId && !p.pendingJoinedBroadcast)
       existing.push({
-        id: p.playerId, userName: p.userName, color: p.color,
+        id: p.playerId, userId: p.userId, userName: p.userName,
+        role: p.role, color: p.color, avatarUrl: p.avatarUrl || '',
         position: p.position, rotation: p.rotation,
         viewMode: p.viewMode || '3d',
-        isMobile: !!p.isMobile
+        isMobile: !!p.isMobile,
+        levelIndex: p.levelIndex || 0,
+        levelUniqueId: p.levelUniqueId || ''
       });
   }
   send(ws, { type: 'Welcome', playerId: client.playerId, role: player.role, players: existing });
