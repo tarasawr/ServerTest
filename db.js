@@ -63,6 +63,8 @@ const INIT_SQL = `
 
   ALTER TABLE project_users ADD COLUMN IF NOT EXISTS color TEXT NOT NULL DEFAULT '';
 
+  ALTER TABLE project_users ADD COLUMN IF NOT EXISTS text_color TEXT NOT NULL DEFAULT '';
+
   CREATE INDEX IF NOT EXISTS project_users_user_idx ON project_users(user_id);
 `;
 
