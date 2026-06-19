@@ -298,38 +298,6 @@ setInterval(() => {
   }
 }, 5_000);
 
-// --- Player colors (10 distinct colors from design) ---
-
-// Палитра — единый источник в projects.js (пары bg+text, хранятся в project_users.color/text_color).
-// pickColor используется только для не-членов сессии (боты / аноним / сессии без projectId).
-const PLAYER_COLORS = projectsModule.PLAYER_COLORS;
-
-// Возвращает свободную пару { color, textColor }, избегая коллизий по фону среди игроков сессии.
-function pickColor(session) {
-  const usedColors = new Set();
-  for (const [, p] of session.players) {
-    if (p.color) usedColors.add(p.color);
-  }
-  const available = PLAYER_COLORS.filter(c => !usedColors.has(c.bg));
-  const pool = available.length > 0 ? available : PLAYER_COLORS;
-  const chosen = pool[Math.floor(Math.random() * pool.length)];
-  return { color: chosen.bg, textColor: chosen.text };
-}
-
-// Пара цветов члена проекта берётся из БД (project_users.color/text_color) — единый источник, общий
-// для HTTP-карточек, sharing-попапов и WS-сессии. Боты/аноним/сессии без projectId — session-пара.
-async function resolveMemberColor(session, msg) {
-  if (!msg.isBot && session.projectId && msg.userId) {
-    try {
-      const pair = await projectsModule.getUserColorPair(session.projectId, msg.userId);
-      if (pair && pair.color) return pair;
-    } catch (e) {
-      log('Session', `getUserColorPair failed for ${msg.userId}: ${e.message}`);
-    }
-  }
-  return pickColor(session);
-}
-
 // --- Helpers ---
 
 function ts() {
@@ -399,7 +367,7 @@ function sendSessionStateTo(session, ws, role) {
     if (p.pendingJoinedBroadcast && p.ws !== ws) continue;
     presence.push({
       playerId: p.playerId, userId: p.userId, userName: p.userName,
-      role: p.role, color: p.color, textColor: p.textColor || '', avatarUrl: p.avatarUrl || '',
+      role: p.role, avatarUrl: p.avatarUrl || '',
       position: p.position, rotation: p.rotation,
       viewMode: p.viewMode || '3d',
       isMobile: !!p.isMobile,
@@ -485,11 +453,10 @@ function getOrCreateLegacySession(ws, client) {
     log('Legacy', 'Session created');
   }
 
-  const colorPair = pickColor(session);
   const player = {
     playerId: client.playerId, userId: null,
     userName: `Designer ${client.playerId}`, role: 'owner',
-    color: colorPair.color, textColor: colorPair.textColor, avatarUrl: '',
+    avatarUrl: '',
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
     viewMode: '3d', isMobile: false, levelIndex: 0, levelUniqueId: '', ws,
     pendingJoinedBroadcast: true
@@ -502,7 +469,7 @@ function getOrCreateLegacySession(ws, client) {
     if (p.playerId !== client.playerId && !p.pendingJoinedBroadcast)
       existing.push({
         id: p.playerId, userId: p.userId, userName: p.userName,
-        role: p.role, color: p.color, textColor: p.textColor || '', avatarUrl: p.avatarUrl || '',
+        role: p.role, avatarUrl: p.avatarUrl || '',
         position: p.position, rotation: p.rotation,
         viewMode: p.viewMode || '3d',
         isMobile: !!p.isMobile,
@@ -597,7 +564,6 @@ async function handleCreateSession(ws, client, msg) {
   const inviteCode = generateCode();
   const sessionId = 'sess_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
-  // Create session first (needed for pickColor)
   const session = {
     id: sessionId, inviteCode, ownerId: client.playerId,
     ownerUserId: msg.userId || null, projectXml: msg.projectXml || '',
@@ -610,11 +576,10 @@ async function handleCreateSession(ws, client, msg) {
     lastActivityByPlayer: new Map()// playerId -> Date.now()
   };
 
-  const colorPair = await resolveMemberColor(session, msg);
   const player = {
     playerId: client.playerId, userId: msg.userId || null,
     userName: msg.userName || `Designer ${client.playerId}`, role: 'owner',
-    color: colorPair.color, textColor: colorPair.textColor, avatarUrl: msg.avatarUrl || '',
+    avatarUrl: msg.avatarUrl || '',
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
     viewMode: '3d', isMobile: !!msg.isMobile, levelIndex: 0, levelUniqueId: '', ws
   };
@@ -627,9 +592,7 @@ async function handleCreateSession(ws, client, msg) {
 
   send(ws, {
     type: 'SessionCreated', inviteCode,
-    playerId: client.playerId,
-    color: player.color,
-    textColor: player.textColor
+    playerId: client.playerId
   });
 
   log('Session', `Created ${sessionId} (invite: ${inviteCode}, permission: ${linkPermission}) by player ${client.playerId}`);
@@ -695,12 +658,11 @@ async function handleJoinSession(ws, client, msg) {
     if (msg.userId && msg.userId === session.ownerUserId) role = 'owner';
   }
 
-  const colorPair = await resolveMemberColor(session, msg);
   const player = {
     playerId: client.playerId, userId: msg.userId || null,
     reconnectToken: msg.reconnectToken || null,
     userName: msg.userName || `Designer ${client.playerId}`, role,
-    color: colorPair.color, textColor: colorPair.textColor, avatarUrl: msg.avatarUrl || '',
+    avatarUrl: msg.avatarUrl || '',
     position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
     viewMode: '3d', isMobile: !!msg.isMobile, levelIndex: 0, levelUniqueId: '', ws,
     pendingJoinedBroadcast: true
@@ -850,7 +812,7 @@ function flushDeferredJoin(session, player, reason) {
   broadcastToSession(session, player.ws, {
     type: 'PlayerJoined', playerId: player.playerId,
     userId: player.userId, userName: player.userName, role: player.role,
-    color: player.color, textColor: player.textColor || '', avatarUrl: player.avatarUrl || '',
+    avatarUrl: player.avatarUrl || '',
     position: player.position, rotation: player.rotation,
     viewMode: player.viewMode || '3d',
     isMobile: !!player.isMobile,

@@ -26,7 +26,8 @@
 
 Дополнительно у участника есть:
 - `isInvitationPending` — приглашён владельцем, но ещё не заходил по ссылке (см. `POST .../invite`).
-- `color` — HEX-цвет аватара, назначается сервером без коллизий из фиксированной палитры (единый источник для HTTP-карточек, sharing-попапов и WS-сессий).
+
+Цвет аватара сервер не назначает и не отдаёт — он вычисляется на клиенте детерминированно из `userId`.
 
 ## Авторизация write-операций
 
@@ -121,7 +122,7 @@
 {
   "globalRole": "can_view",
   "users": [
-    { "userId", "name", "avatarUrl", "role", "isInvitationPending", "color" },
+    { "userId", "name", "avatarUrl", "role", "isInvitationPending" },
     ...
   ]
 }
@@ -138,7 +139,7 @@
 
 **Успех (200):**
 ```json
-{ "users": [ { "userId", "name", "avatarUrl", "color" }, ... ] }
+{ "users": [ { "userId", "name", "avatarUrl" }, ... ] }
 ```
 
 **Ошибки:** `404` — проект не найден.

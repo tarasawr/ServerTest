@@ -7,7 +7,7 @@ const db = require('./db');
 //   projects(project_id, owner_user_id, owner_name, project_title, project_xml,
 //            global_role, last_sync_date)
 //   project_users(project_id, user_id, name, avatar_url, role, is_invitation_pending,
-//                 color, text_color, created_at)
+//                 created_at)
 //
 // `role` is NULL when a user inherits the project-level global_role.
 // 'owner' / 'can_edit' / 'can_view' are explicit overrides.
@@ -142,93 +142,9 @@ async function broadcastRoleChanged(sessions, projectId, userId, newRole) {
   }
 }
 
-// --- Per-user avatar colors (single source of truth) ---
-// Палитра живёт на сервере парами: цвет фона (bg) + цвет текста (text). Пара назначается члену
-// проекта без коллизий по фону (до размера палитры), хранится в project_users.color / text_color
-// и отдаётся всем клиентам парами: HTTP (/users, /active-users) и WS-сессии.
-const PLAYER_COLORS = [
-  { bg: '#F8ED15', text: '#000000' },
-  { bg: '#FFC935', text: '#000000' },
-  { bg: '#F79009', text: '#FFFFFF' },
-  { bg: '#F34439', text: '#FFFFFF' },
-  { bg: '#EF0AFF', text: '#FFFFFF' },
-  { bg: '#742AED', text: '#FFFFFF' },
-  { bg: '#4C5FF0', text: '#FFFFFF' },
-  { bg: '#5AA9FF', text: '#FFFFFF' },
-  { bg: '#7CD4FD', text: '#000000' },
-  { bg: '#4BD3CE', text: '#000000' },
-];
-
-// Текст для заданного фона по палитре (для backfill строк, у которых есть фон, но нет текста).
-function textForBg(bg) {
-  const entry = PLAYER_COLORS.find(c => c.bg === bg);
-  return entry ? entry.text : '#FFFFFF';
-}
-
-// usedColors — множество уже занятых ФОНОВ. Возвращает свободную пару { color, textColor }.
-function pickFreeColor(usedColors) {
-  const free = PLAYER_COLORS.filter(c => !usedColors.has(c.bg));
-  const pool = free.length > 0 ? free : PLAYER_COLORS;
-  const chosen = pool[Math.floor(Math.random() * pool.length)];
-  return { color: chosen.bg, textColor: chosen.text };
-}
-
-// Назначает пару (фон + текст) каждому члену проекта, у которого её ещё нет (новые вступления +
-// backfill старых строк). Без коллизий по фону в пределах палитры; при переполнении фоны повторяются.
-// Транзакция + блокировка строк, чтобы конкурентные вызовы не выдали один фон двум членам.
-async function ensureColors(projectId) {
-  const probe = await db.query(
-    `SELECT 1 FROM project_users
-     WHERE project_id = $1 AND (color IS NULL OR color = '' OR text_color IS NULL OR text_color = '')
-     LIMIT 1`,
-    [projectId]
-  );
-  if (probe.rows.length === 0) return; // быстрый путь — у всех уже есть пара
-
-  await db.transaction(async client => {
-    const { rows } = await client.query(
-      `SELECT user_id, color, text_color FROM project_users WHERE project_id = $1 ORDER BY created_at FOR UPDATE`,
-      [projectId]
-    );
-    const used = new Set(rows.filter(r => r.color).map(r => r.color));
-    for (const r of rows) {
-      let color = r.color;
-      let textColor = r.text_color;
-      if (!color) {
-        const pair = pickFreeColor(used);
-        color = pair.color;
-        textColor = pair.textColor;
-        used.add(color);
-      } else if (!textColor) {
-        textColor = textForBg(color);
-      } else {
-        continue; // пара уже на месте
-      }
-      await client.query(
-        `UPDATE project_users SET color = $1, text_color = $2 WHERE project_id = $3 AND user_id = $4`,
-        [color, textColor, projectId, r.user_id]
-      );
-    }
-  });
-}
-
-// Пара цветов члена проекта (с ленивым назначением, если её ещё нет). Null для не-членов.
-async function getUserColorPair(projectId, userId) {
-  if (!projectId || !userId) return null;
-  await ensureColors(projectId);
-  const { rows } = await db.query(
-    `SELECT color, text_color FROM project_users WHERE project_id = $1 AND user_id = $2`,
-    [projectId, userId]
-  );
-  if (rows.length === 0) return null;
-  if (!rows[0].color) return null;
-  return { color: rows[0].color, textColor: rows[0].text_color || textForBg(rows[0].color) };
-}
-
 async function serializeUsers(projectId, projRow) {
-  await ensureColors(projectId);
   const r = await db.query(
-    `SELECT user_id, name, avatar_url, role, is_invitation_pending, color, text_color
+    `SELECT user_id, name, avatar_url, role, is_invitation_pending
      FROM project_users WHERE project_id = $1 AND role IS DISTINCT FROM 'no_access'
      ORDER BY created_at`,
     [projectId]
@@ -238,9 +154,7 @@ async function serializeUsers(projectId, projRow) {
     name: u.name,
     avatarUrl: u.avatar_url,
     role: getEffectiveRole(projRow, u),
-    isInvitationPending: Boolean(u.is_invitation_pending),
-    color: u.color || '',
-    textColor: u.text_color || ''
+    isInvitationPending: Boolean(u.is_invitation_pending)
   }));
 }
 
@@ -723,9 +637,7 @@ async function handleGetProjectActiveUsers(res, projectId, sessions) {
         list.push({
           userId: p.userId || '',
           name: p.userName || '',
-          avatarUrl: p.avatarUrl || '',
-          color: p.color || '',
-          textColor: p.textColor || ''
+          avatarUrl: p.avatarUrl || ''
         });
       }
     }
@@ -894,6 +806,5 @@ function onXmlUpdated(projectId, xml) {
 module.exports = {
   handleRequest, onXmlUpdated,
   getProjectRow, getProjectUserRow, getEffectiveRole,
-  assertIsOwner, resolveCallerUserId,
-  getUserColorPair, PLAYER_COLORS
+  assertIsOwner, resolveCallerUserId
 };
