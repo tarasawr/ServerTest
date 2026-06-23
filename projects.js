@@ -142,14 +142,21 @@ async function broadcastRoleChanged(sessions, projectId, userId, newRole) {
   }
 }
 
-async function serializeUsers(projectId, projRow) {
+// Pure visibility rule for the user list: invitation-pending rows may carry a
+// raw invitee email, so they are returned to the project owner only. Extracted
+// as a side-effect-free function so the rule is unit-testable without a DB.
+function filterUsersForCaller(rows, includePending) {
+  return includePending ? rows : rows.filter(u => !u.is_invitation_pending);
+}
+
+async function serializeUsers(projectId, projRow, includePending) {
   const r = await db.query(
     `SELECT user_id, name, avatar_url, role, is_invitation_pending
      FROM project_users WHERE project_id = $1 AND role IS DISTINCT FROM 'no_access'
      ORDER BY created_at`,
     [projectId]
   );
-  return r.rows.map(u => ({
+  return filterUsersForCaller(r.rows, includePending).map(u => ({
     userId: u.user_id,
     name: u.name,
     avatarUrl: u.avatar_url,
@@ -343,12 +350,15 @@ async function handleGetProject(res, projectId) {
   }
 }
 
-async function handleGetProjectUsers(res, projectId) {
+async function handleGetProjectUsers(res, projectId, callerUserId) {
   try {
     const projRow = await getProjectRow(projectId);
     if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
 
-    const users = await serializeUsers(projectId, projRow);
+    // Invitation-pending invitees are visible to the project owner only.
+    // assertIsOwner in pure-predicate mode (res = null) just yields the boolean.
+    const includePending = assertIsOwner(projRow, callerUserId, null);
+    const users = await serializeUsers(projectId, projRow, includePending);
     jsonOk(res, { globalRole: projRow.global_role, users });
   } catch (e) {
     log('Projects', `ERROR handleGetProjectUsers: ${e.message}`);
@@ -743,7 +753,7 @@ function handleRequest(req, res, url, sessions, projectIndex) {
   // GET|DELETE /projects/:id/users
   const usersM = p.match(/^\/projects\/([^\/]+)\/users$/);
   if (usersM) {
-    if (req.method === 'GET') { handleGetProjectUsers(res, usersM[1]); return true; }
+    if (req.method === 'GET') { handleGetProjectUsers(res, usersM[1], url.searchParams.get('callerUserId')); return true; }
     if (req.method === 'DELETE') { handleDeleteAllUsers(req, res, usersM[1]); return true; }
   }
 
@@ -806,5 +816,5 @@ function onXmlUpdated(projectId, xml) {
 module.exports = {
   handleRequest, onXmlUpdated,
   getProjectRow, getProjectUserRow, getEffectiveRole,
-  assertIsOwner, resolveCallerUserId
+  assertIsOwner, resolveCallerUserId, filterUsersForCaller
 };
