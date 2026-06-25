@@ -6,8 +6,8 @@ const db = require('./db');
 // Persisted in Postgres (Neon). Schema in db.js:
 //   projects(project_id, owner_user_id, owner_name, project_title, project_xml,
 //            global_role, last_sync_date)
-//   project_users(project_id, user_id, name, email, avatar_url, role,
-//                 is_invitation_pending, created_at)
+//   project_users(project_id, user_id, name, avatar_url, role, is_invitation_pending,
+//                 created_at)
 //
 // `role` is NULL when a user inherits the project-level global_role.
 // 'owner' / 'can_edit' / 'can_view' are explicit overrides.
@@ -151,7 +151,7 @@ function filterUsersForCaller(rows, includePending) {
 
 async function serializeUsers(projectId, projRow, includePending) {
   const r = await db.query(
-    `SELECT user_id, name, email, avatar_url, role, is_invitation_pending
+    `SELECT user_id, name, avatar_url, role, is_invitation_pending
      FROM project_users WHERE project_id = $1 AND role IS DISTINCT FROM 'no_access'
      ORDER BY created_at`,
     [projectId]
@@ -159,7 +159,6 @@ async function serializeUsers(projectId, projRow, includePending) {
   return filterUsersForCaller(r.rows, includePending).map(u => ({
     userId: u.user_id,
     name: u.name,
-    email: u.email || '',
     avatarUrl: u.avatar_url,
     role: getEffectiveRole(projRow, u),
     isInvitationPending: Boolean(u.is_invitation_pending)
@@ -170,7 +169,7 @@ async function serializeUsers(projectId, projRow, includePending) {
 
 async function handlePostProjects(req, res) {
   const body = await readBody(req);
-  const { projectId, ownerUserId, ownerName, ownerEmail, ownerAvatarUrl, projectXml, projectTitle } = body;
+  const { projectId, ownerUserId, ownerName, ownerAvatarUrl, projectXml, projectTitle } = body;
 
   if (!projectId || !ownerUserId) {
     return jsonErr(res, 400, 'projectId and ownerUserId are required');
@@ -210,10 +209,10 @@ async function handlePostProjects(req, res) {
       // ownerless-in-users-table and the next RegisterProject call won't
       // re-insert (ownership is recorded on `projects.owner_user_id`).
       await db.query(
-        `INSERT INTO project_users (project_id, user_id, name, email, avatar_url, role)
-         VALUES ($1, $2, $3, $4, $5, 'owner')
+        `INSERT INTO project_users (project_id, user_id, name, avatar_url, role)
+         VALUES ($1, $2, $3, $4, 'owner')
          ON CONFLICT (project_id, user_id) DO NOTHING`,
-        [projectId, ownerUserId, ownerName || 'Unknown', ownerEmail || '', ownerAvatarUrl || '']
+        [projectId, ownerUserId, ownerName || 'Unknown', ownerAvatarUrl || '']
       );
       log('Projects', `Registered project ${projectId} by owner ${ownerUserId}`);
     } else {
@@ -221,15 +220,11 @@ async function handlePostProjects(req, res) {
       // (projects.owner_user_id) is NOT changed — only the original owner
       // can re-register, foreign actors would land here through other endpoints
       // protected by assertIsOwner.
-      if ((ownerAvatarUrl || ownerEmail) && actualOwnerId === ownerUserId) {
-        // Заполняем email только если он ещё пуст (NULLIF), чтобы повторная
-        // регистрация без email не затирала ранее сохранённый адрес.
+      if (ownerAvatarUrl && actualOwnerId === ownerUserId) {
         await db.query(
-          `UPDATE project_users
-           SET avatar_url = COALESCE(NULLIF($1, ''), avatar_url),
-               email = COALESCE(NULLIF(email, ''), $2)
-           WHERE project_id = $3 AND user_id = $4`,
-          [ownerAvatarUrl || '', ownerEmail || '', projectId, ownerUserId]
+          `UPDATE project_users SET avatar_url = $1
+           WHERE project_id = $2 AND user_id = $3`,
+          [ownerAvatarUrl, projectId, ownerUserId]
         );
       }
       log('Projects', `Re-registered project ${projectId} by owner ${ownerUserId} (existing owner: ${actualOwnerId})`);
@@ -248,7 +243,7 @@ async function handleJoinProject(req, res, projectId) {
     if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
 
     const body = await readBody(req);
-    const { userId, name, email, avatarUrl } = body;
+    const { userId, name, avatarUrl } = body;
 
     if (!userId) return jsonErr(res, 400, 'userId is required');
 
@@ -263,14 +258,11 @@ async function handleJoinProject(req, res, projectId) {
     if (userRow) {
       // Joining accepts any pending invitation — clear the flag unconditionally
       // (the WHERE narrows to rows still flagged, so this is a no-op otherwise).
-      // Заодно дозаполняем email, если он ещё пуст (email-приглашённый ряд знает
-      // адрес заранее; обычный join присылает реальный email при первом входе).
       await db.query(
         `UPDATE project_users
-         SET is_invitation_pending = false,
-             email = COALESCE(NULLIF(email, ''), $3)
-         WHERE project_id = $1 AND user_id = $2`,
-        [projectId, userId, email || '']
+         SET is_invitation_pending = false
+         WHERE project_id = $1 AND user_id = $2 AND is_invitation_pending = true`,
+        [projectId, userId]
       );
       const effectiveRole = getEffectiveRole(projRow, userRow);
       log('Projects', `User ${userId} already in project ${projectId} (role: ${effectiveRole})`);
@@ -278,9 +270,9 @@ async function handleJoinProject(req, res, projectId) {
     }
 
     await db.query(
-      `INSERT INTO project_users (project_id, user_id, name, email, avatar_url, role, is_invitation_pending)
-       VALUES ($1, $2, $3, $4, $5, NULL, false)`,
-      [projectId, userId, name || 'Unknown', email || '', avatarUrl || '']
+      `INSERT INTO project_users (project_id, user_id, name, avatar_url, role, is_invitation_pending)
+       VALUES ($1, $2, $3, $4, NULL, false)`,
+      [projectId, userId, name || 'Unknown', avatarUrl || '']
     );
 
     log('Projects', `User ${userId} (${name || 'Unknown'}) joined project ${projectId} (inherits globalRole: ${projRow.global_role})`);
@@ -300,7 +292,6 @@ async function handleInviteUser(req, res, projectId, userId) {
   try {
     const body = await readBody(req);
     const name = body && typeof body.name === 'string' ? body.name : '';
-    const email = body && typeof body.email === 'string' ? body.email : '';
     const avatarUrl = body && typeof body.avatarUrl === 'string' ? body.avatarUrl : '';
     const callerUserId = resolveCallerUserId(body);
 
@@ -317,10 +308,10 @@ async function handleInviteUser(req, res, projectId, userId) {
 
     await db.transaction(async client => {
       await client.query(
-        `INSERT INTO project_users (project_id, user_id, name, email, avatar_url, role, is_invitation_pending)
-         VALUES ($1, $2, $3, $4, $5, NULL, true)
+        `INSERT INTO project_users (project_id, user_id, name, avatar_url, role, is_invitation_pending)
+         VALUES ($1, $2, $3, $4, NULL, true)
          ON CONFLICT (project_id, user_id) DO NOTHING`,
-        [projectId, userId, name, email, avatarUrl]
+        [projectId, userId, name, avatarUrl]
       );
     });
 

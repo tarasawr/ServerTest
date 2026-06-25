@@ -41,7 +41,6 @@ const INIT_SQL = `
     project_id  TEXT        NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
     user_id     TEXT        NOT NULL,
     name        TEXT        NOT NULL DEFAULT 'Unknown',
-    email       TEXT        NOT NULL DEFAULT '',
     avatar_url  TEXT        NOT NULL DEFAULT '',
     role        TEXT,        -- NULL = inherits project.global_role; 'owner' | 'can_view' | 'can_edit' | 'no_access' otherwise
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -61,8 +60,6 @@ const INIT_SQL = `
   END $$;
 
   ALTER TABLE project_users ADD COLUMN IF NOT EXISTS is_invitation_pending BOOLEAN NOT NULL DEFAULT false;
-
-  ALTER TABLE project_users ADD COLUMN IF NOT EXISTS email TEXT NOT NULL DEFAULT '';
 
   ALTER TABLE project_users DROP COLUMN IF EXISTS color;
 
