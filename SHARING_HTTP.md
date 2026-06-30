@@ -63,8 +63,8 @@
 
 Список проектов, в которых участвует пользователь `:uid` (сегмент URL-декодируется). Скрываются проекты, где у пользователя роль `no_access`. Сортировка — по `lastSyncDate` (свежие сверху).
 
-**Успех (200):** `{ "projects": [ { "projectId", "ownerName", "projectTitle", "role", "lastSyncDate" }, ... ] }`
-`role` — эффективная роль пользователя в каждом проекте.
+**Успех (200):** `{ "projects": [ { "projectId", "ownerName", "projectTitle", "role", "lastSyncDate", "activeUsers": [ { "userId", "name", "avatarUrl" }, ... ] }, ... ] }`
+`role` — эффективная роль пользователя в каждом проекте. `activeUsers` — участники, прямо сейчас находящиеся в живой сессии этого проекта (то же, что отдаёт `GET /projects/:id/active-users`, но свёрнуто в общий ответ, чтобы галерея не делала запрос на каждый проект). Пустой массив, если активной сессии нет.
 
 ---
 
@@ -320,7 +320,7 @@ XML проекта из первой активной сессии с игрок
 | `LeaveProject` | `POST /projects/{id}/leave` |
 | `GetProjectGlobalRole` / `IsServerReachable` | `GET /projects/{id}` |
 | `GetProjectUsers` | `GET /projects/{id}/users` |
-| `GetProjectActiveUsers` | `GET /projects/{id}/active-users` |
+| _(активные участники свёрнуты в ответ `GetUserProjects`)_ | `GET /projects/{id}/active-users` _(эндпоинт оставлен для уже выпущенных сборок)_ |
 | `SetProjectGlobalRole` | `PUT /projects/{id}/globalRole` |
 | `SetUserRole` | `PUT /projects/{id}/users/{uid}/role` |
 | `InviteUser` | `POST /projects/{id}/users/{uid}/invite` |

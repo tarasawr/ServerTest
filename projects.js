@@ -366,7 +366,23 @@ async function handleGetProjectUsers(res, projectId, callerUserId) {
   }
 }
 
-async function handleGetUserProjects(res, userId) {
+// Groups players currently online by the project their session is linked to.
+// One pass over the in-memory sessions map → projectId → [{userId,name,avatarUrl}].
+function buildActiveUsersByProject(sessions) {
+  const map = new Map();
+  if (!sessions) return map;
+  for (const [, s] of sessions) {
+    if (!s.projectId) continue;
+    let arr = map.get(s.projectId);
+    if (!arr) { arr = []; map.set(s.projectId, arr); }
+    for (const [, p] of s.players) {
+      arr.push({ userId: p.userId || '', name: p.userName || '', avatarUrl: p.avatarUrl || '' });
+    }
+  }
+  return map;
+}
+
+async function handleGetUserProjects(res, userId, sessions) {
   try {
     const { rows } = await db.query(
       `SELECT p.project_id, p.owner_name, p.project_title, p.global_role,
@@ -378,6 +394,8 @@ async function handleGetUserProjects(res, userId) {
       [userId]
     );
 
+    const activeByProject = buildActiveUsersByProject(sessions);
+
     const result = rows.map(p => {
       const role = p.user_role === 'owner'
         ? 'owner'
@@ -387,7 +405,8 @@ async function handleGetUserProjects(res, userId) {
         ownerName: p.owner_name,
         projectTitle: p.project_title || '',
         role,
-        lastSyncDate: isoDate(p.last_sync_date)
+        lastSyncDate: isoDate(p.last_sync_date),
+        activeUsers: activeByProject.get(p.project_id) || []
       };
     });
 
@@ -640,18 +659,8 @@ async function handleGetProjectActiveUsers(res, projectId, sessions) {
     const projRow = await getProjectRow(projectId);
     if (!projRow) return jsonErr(res, 404, `Project ${projectId} not found`);
 
-    const list = [];
-    for (const [, s] of sessions) {
-      if (s.projectId !== projectId) continue;
-      for (const [, p] of s.players) {
-        list.push({
-          userId: p.userId || '',
-          name: p.userName || '',
-          avatarUrl: p.avatarUrl || ''
-        });
-      }
-    }
-    jsonOk(res, { users: list });
+    const activeByProject = buildActiveUsersByProject(sessions);
+    jsonOk(res, { users: activeByProject.get(projectId) || [] });
   } catch (e) {
     log('Projects', `ERROR handleGetProjectActiveUsers: ${e.message}`);
     jsonErr(res, 500, 'Internal error');
@@ -711,7 +720,7 @@ function handleRequest(req, res, url, sessions, projectIndex) {
   // GET /projects/user/:uid  (check before /:id to avoid conflict)
   const userProjectsM = p.match(/^\/projects\/user\/([^\/]+)$/);
   if (userProjectsM && req.method === 'GET') {
-    handleGetUserProjects(res, decodeURIComponent(userProjectsM[1]));
+    handleGetUserProjects(res, decodeURIComponent(userProjectsM[1]), sessions);
     return true;
   }
 
