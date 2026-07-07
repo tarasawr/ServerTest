@@ -247,6 +247,38 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // POST /projects/:projectId/session/role — mirror a prod role change into the live session:
+  // update the target player's in-session role and broadcast RoleChanged so they get edit
+  // controls + a popup instantly. userId empty = global role change (all non-owner players).
+  const sessRoleM = url.pathname.match(/^\/projects\/([^\/]+)\/session\/role$/);
+  if (sessRoleM && req.method === 'POST') {
+    const projectId = decodeURIComponent(sessRoleM[1]);
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      let userId, newRole;
+      try { const b = JSON.parse(body || '{}'); userId = b.userId || ''; newRole = b.newRole; }
+      catch (e) { return sendJsonResponse(res, 400, { message: 'Invalid JSON' }); }
+      if (newRole !== 'can_view' && newRole !== 'can_edit')
+        return sendJsonResponse(res, 400, { message: 'newRole must be can_view or can_edit' });
+      const inviteCode = projectIndex.get(projectId);
+      const session = inviteCode ? sessions.get(inviteCode) : null;
+      if (!session) return sendJsonResponse(res, 404, { message: 'No active session for this project' });
+
+      const wireRole = newRole === 'can_edit' ? 'editor' : 'viewer';
+      for (const [, p] of session.players) {
+        if (p.role === 'owner') continue;
+        if (userId ? (p.userId === userId) : true) p.role = wireRole;
+      }
+      if (!userId) session.linkPermission = newRole === 'can_edit' ? 'edit' : 'view';
+
+      broadcastToSession(session, null, { type: 'RoleChanged', projectId, userId, newRole });
+      log('Session', `Role push into ${session.id}: user=${userId || '(global)'} -> ${newRole}`);
+      return sendJsonResponse(res, 200, { ok: true });
+    });
+    return;
+  }
+
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end(`Multiplayer server OK. Sessions: ${sessions.size}, Clients: ${clients.size}`);
 });
