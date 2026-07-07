@@ -1,7 +1,6 @@
 const http = require('http');
 const WebSocket = require('ws');
 const crypto = require('crypto'); // DEBUG_STATE_VERIFIER
-const projectsModule = require('./projects');
 
 const PORT = process.env.PORT || 3000;
 const LEGACY_INVITE = '__legacy__';
@@ -212,7 +211,41 @@ const server = http.createServer((req, res) => {
     }
   }
 
-  if (projectsModule.handleRequest(req, res, url, sessions, projectIndex)) return;
+  // GET /projects/:id/session — find the invite code of the live session linked to a project.
+  // (The only project-scoped endpoints kept here — sharing/lobby moved to the prod /collab backend.)
+  const projSessionM = url.pathname.match(/^\/projects\/([^\/]+)\/session$/);
+  if (projSessionM && req.method === 'GET') {
+    const projectId = decodeURIComponent(projSessionM[1]);
+    for (const [inviteCode, s] of sessions) {
+      if (s.projectId === projectId && s.players.size > 0) return sendJsonResponse(res, 200, { inviteCode });
+    }
+    return sendJsonResponse(res, 404, { message: 'No active session for this project' });
+  }
+
+  // PUT /sessions/:inviteCode/project — bind a live session to a projectId (in-memory only).
+  const sessLinkM = url.pathname.match(/^\/sessions\/([^\/]+)\/project$/);
+  if (sessLinkM && req.method === 'PUT') {
+    const inviteCode = decodeURIComponent(sessLinkM[1]);
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      let projectId;
+      try { projectId = JSON.parse(body || '{}').projectId; }
+      catch (e) { return sendJsonResponse(res, 400, { message: 'Invalid JSON' }); }
+      if (!projectId) return sendJsonResponse(res, 400, { message: 'projectId is required' });
+      if (inviteCode === LEGACY_INVITE) return sendJsonResponse(res, 400, { message: 'Cannot link legacy session' });
+      const session = sessions.get(inviteCode);
+      if (!session) return sendJsonResponse(res, 404, { message: `Session ${inviteCode} not found` });
+      if (session.projectId === projectId) return sendJsonResponse(res, 200, { ok: true, alreadyLinked: true });
+      if (session.projectId && session.projectId !== projectId) return sendJsonResponse(res, 409, { message: 'Session already linked to another project' });
+      if (projectIndex.has(projectId) && projectIndex.get(projectId) !== inviteCode) return sendJsonResponse(res, 409, { message: 'Another session is already linked to this project' });
+      session.projectId = projectId;
+      projectIndex.set(projectId, inviteCode);
+      log('Session', `Session ${inviteCode} linked to project ${projectId}`);
+      return sendJsonResponse(res, 200, { ok: true });
+    });
+    return;
+  }
 
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end(`Multiplayer server OK. Sessions: ${sessions.size}, Clients: ${clients.size}`);
@@ -306,6 +339,11 @@ function ts() {
 
 function log(tag, msg) {
   console.log(`${ts()} [${tag}] ${msg}`);
+}
+
+function sendJsonResponse(res, status, obj) {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(obj));
 }
 
 function generateCode() {
@@ -494,27 +532,6 @@ function getSession(ws, client, autoJoinLegacy) {
 
 // --- Session lifecycle ---
 
-// Resolves the wire role ('owner' | 'editor' | 'viewer') for a joining player from the project DB.
-// Source of truth: projects.owner_user_id, project_users.role (per-user override), projects.global_role.
-async function resolveRoleFromDb(projectId, userId) {
-  const projRow = await projectsModule.getProjectRow(projectId);
-  if (!projRow) return { error: 'NOT_FOUND', message: `Project ${projectId} not registered` };
-
-  if (userId && userId === projRow.owner_user_id) return { role: 'owner' };
-
-  let effective;
-  if (userId) {
-    const userRow = await projectsModule.getProjectUserRow(projectId, userId);
-    effective = projectsModule.getEffectiveRole(projRow, userRow);
-  } else {
-    effective = projRow.global_role; // guest with no userId — inherits project-level role
-  }
-
-  if (effective === 'owner') return { role: 'owner' };
-  if (effective === 'can_edit') return { role: 'editor' };
-  return { role: 'viewer' };
-}
-
 async function handleCreateSession(ws, client, msg) {
   if (client.sessionId) { sendError(ws, 'ALREADY_IN_SESSION', 'Already in a session'); return; }
 
@@ -547,19 +564,7 @@ async function handleCreateSession(ws, client, msg) {
     }
   }
 
-  // Resolve link permission from the project DB row (single source of truth).
-  // For sessions with no projectId (anonymous/test path) the legacy msg.linkPermission is used.
-  let linkPermission;
-  if (projectId) {
-    const projRow = await projectsModule.getProjectRow(projectId);
-    if (!projRow) {
-      sendError(ws, 'NOT_FOUND', `Project ${projectId} not registered`);
-      return;
-    }
-    linkPermission = projRow.global_role === 'can_edit' ? 'edit' : 'view';
-  } else {
-    linkPermission = msg.linkPermission || 'edit';
-  }
+  const linkPermission = msg.linkPermission || 'edit';
 
   const inviteCode = generateCode();
   const sessionId = 'sess_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -644,15 +649,9 @@ async function handleJoinSession(ws, client, msg) {
   if (msg.isBot) client.isBot = true;
   if (msg.isMirror) client.isMirror = true;
 
-  // Resolve role from the project DB (single source of truth). Bots and DB-less sessions
-  // (anonymous/test invites) fall back to a derived rule.
   let role;
   if (msg.isBot) {
     role = 'editor';
-  } else if (session.projectId) {
-    const resolved = await resolveRoleFromDb(session.projectId, msg.userId);
-    if (resolved.error) { sendError(ws, resolved.error, resolved.message); return; }
-    role = resolved.role;
   } else {
     role = session.linkPermission === 'edit' ? 'editor' : 'viewer';
     if (msg.userId && msg.userId === session.ownerUserId) role = 'owner';
@@ -1251,7 +1250,6 @@ function handleUpdateState(ws, client, msg) {
   }
   const xmlLen = (msg.projectXml || '').length;
   session.projectXml = msg.projectXml || session.projectXml;
-  projectsModule.onXmlUpdated(session.projectId, session.projectXml);
   log('Session', `${session.id} state updated by player=${client.playerId} role=${player.role} (xml: ${xmlLen} chars, seq: ${session.sequenceNumber})`);
   broadcastStateChecksum(session); // DEBUG_STATE_VERIFIER
 }
