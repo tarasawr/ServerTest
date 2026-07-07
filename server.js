@@ -222,6 +222,22 @@ const server = http.createServer((req, res) => {
     return sendJsonResponse(res, 404, { message: 'No active session for this project' });
   }
 
+  // DELETE /projects/:id/session — owner stopped sharing on prod: end the live session for everyone.
+  // Broadcasts SessionClosed(sharing_stopped), closes every player's ws, then tears the session down.
+  if (projSessionM && req.method === 'DELETE') {
+    const projectId = decodeURIComponent(projSessionM[1]);
+    const inviteCode = projectIndex.get(projectId);
+    const session = inviteCode ? sessions.get(inviteCode) : null;
+    if (!session) return sendJsonResponse(res, 404, { message: 'No active session for this project' });
+    broadcastToSession(session, null, { type: 'SessionClosed', reason: 'sharing_stopped' });
+    for (const [, p] of session.players) {
+      if (p.ws && p.ws.readyState === WebSocket.OPEN) { try { p.ws.close(); } catch (e) {} }
+    }
+    deleteSession(session);
+    log('Session', `Session ${inviteCode} closed (project ${projectId} sharing stopped)`);
+    return sendJsonResponse(res, 200, { ok: true });
+  }
+
   // PUT /sessions/:inviteCode/project — bind a live session to a projectId (in-memory only).
   const sessLinkM = url.pathname.match(/^\/sessions\/([^\/]+)\/project$/);
   if (sessLinkM && req.method === 'PUT') {
