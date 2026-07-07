@@ -229,9 +229,15 @@ const server = http.createServer((req, res) => {
     const inviteCode = projectIndex.get(projectId);
     const session = inviteCode ? sessions.get(inviteCode) : null;
     if (!session) return sendJsonResponse(res, 404, { message: 'No active session for this project' });
-    broadcastToSession(session, null, { type: 'SessionClosed', reason: 'sharing_stopped' });
+    // Kick only non-owner participants; the owner ends its own session client-side
+    // (StopSharingAndReopenLocalAsync) — closing the owner here would race that local teardown.
+    const closedMsg = JSON.stringify({ type: 'SessionClosed', reason: 'sharing_stopped' });
     for (const [, p] of session.players) {
-      if (p.ws && p.ws.readyState === WebSocket.OPEN) { try { p.ws.close(); } catch (e) {} }
+      if (p.role === 'owner') continue;
+      if (p.ws && p.ws.readyState === WebSocket.OPEN) {
+        try { p.ws.send(closedMsg); } catch (e) {}
+        try { p.ws.close(); } catch (e) {}
+      }
     }
     deleteSession(session);
     log('Session', `Session ${inviteCode} closed (project ${projectId} sharing stopped)`);
