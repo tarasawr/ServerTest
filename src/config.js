@@ -20,10 +20,22 @@ const HISTORY_LEN = Number(process.env.HISTORY_LEN) || 120;
 // Drop a socket that misses two heartbeats — Render's proxy does not always deliver a close frame.
 const HEARTBEAT_MS = Number(process.env.HEARTBEAT_MS) || 30000;
 
+// Сводка «всё живо, вот текущие цифры» раз в столько мс. На Render единственное окно в сервер —
+// поток логов, и без периодической строки непонятно, работает он вообще или висит.
+const STATUS_EVERY_MS = Number(process.env.STATUS_EVERY_MS) || 60000;
+
 const REV = (process.env.RENDER_GIT_COMMIT || process.env.GIT_SHA || 'dev').slice(0, 7);
 
+// Тег выравнивается по ширине, чтобы столбец сообщений не прыгал и лог читался глазами.
 function log(tag, msg) {
-  console.log(`[${new Date().toISOString()}] [${tag}] ${msg}`);
+  console.log(`${new Date().toISOString()} ${tag.padEnd(7)} ${msg}`);
 }
 
-module.exports = { PORT, DEVICE_TIMEOUT_MS, TICK_MS, DEVICE_KEY, HISTORY_LEN, HEARTBEAT_MS, REV, log };
+function warn(tag, msg) {
+  console.warn(`${new Date().toISOString()} ${tag.padEnd(7)} WARN ${msg}`);
+}
+
+module.exports = {
+  PORT, DEVICE_TIMEOUT_MS, TICK_MS, DEVICE_KEY, HISTORY_LEN, HEARTBEAT_MS,
+  STATUS_EVERY_MS, REV, log, warn,
+};
