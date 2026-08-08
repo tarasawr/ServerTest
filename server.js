@@ -3,8 +3,8 @@
 const http = require('http');
 
 const {
-  PORT, TICK_MS, DEVICE_KEY, DEVICE_TIMEOUT_MS, HISTORY_LEN, HEARTBEAT_MS,
-  STATUS_EVERY_MS, REV, log, warn,
+  PORT, TICK_MS, DEVICE_KEY, DEVICE_TIMEOUT_MS, HEARTBEAT_MS,
+  HISTORY_WINDOW_MS, HISTORY_EVERY_MS, STATUS_EVERY_MS, REV, log, warn,
 } = require('./src/config');
 const { CATALOG } = require('./src/catalog');
 const { tick, summary } = require('./src/store');
@@ -61,7 +61,13 @@ server.listen(PORT, () => {
   // Полный дамп конфига на старте: почти каждый «почему оно себя так ведёт» на Render — это
   // переменная окружения, выставленная не так, как ожидалось.
   log('Server', `esp-server up — rev=${REV} port=${PORT} node=${process.version}`);
-  log('Server', `config tick=${TICK_MS}ms deviceTimeout=${DEVICE_TIMEOUT_MS}ms heartbeat=${HEARTBEAT_MS}ms history=${HISTORY_LEN} status=${STATUS_EVERY_MS}ms`);
+  log('Server', `config tick=${TICK_MS}ms deviceTimeout=${DEVICE_TIMEOUT_MS}ms heartbeat=${HEARTBEAT_MS}ms status=${STATUS_EVERY_MS}ms`);
+  const step = Math.max(HISTORY_EVERY_MS, TICK_MS);
+  log('Server', `history window=${HISTORY_WINDOW_MS / 60000}min every=${step / 1000}s -> up to ${Math.floor(HISTORY_WINDOW_MS / step)} points per sensor`);
+  // Историю пишет тик, так что просьба семплировать чаще тика тихо не исполнится.
+  if (HISTORY_EVERY_MS < TICK_MS) {
+    warn('Server', `HISTORY_EVERY_MS=${HISTORY_EVERY_MS}ms is finer than TICK_MS=${TICK_MS}ms — history samples at ${step}ms`);
+  }
   log('Server', `sensors (${CATALOG.length}): ${CATALOG.map((s) => `${s.id}[${s.unit || 'bool'}]`).join(' ')}`);
   log('Server', 'routes: GET /health /api/sensors /api/history · POST /api/sensors · WS /ws · dashboard /');
   if (DEVICE_KEY) log('Server', 'DEVICE_KEY set — POST /api/sensors requires the X-Device-Key header');

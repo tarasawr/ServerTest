@@ -4,7 +4,7 @@ const path = require('path');
 const express = require('express');
 
 const { DEVICE_KEY, REV, warn } = require('./config');
-const { state, snapshot, ingest, deviceIsLive } = require('./store');
+const { snapshot, ingest, deviceIsLive, historyPayload } = require('./store');
 
 // Плата за NAT-ом, поэтому в логе полезнее видеть внешний адрес, который проставил прокси Render,
 // чем адрес самого прокси.
@@ -45,8 +45,12 @@ function createApp(broadcast) {
   // hold a socket open.
   app.get('/api/sensors', (req, res) => res.json(snapshot()));
 
-  // Recent snapshots, oldest first — for charts later.
-  app.get('/api/history', (req, res) => res.json({ history: state.history }));
+  // Последний час, старое первым — бэкфилл для графика. ?ids=a,b обрезает до нужных рядов, чтобы
+  // клиент не тянул все датчики ради двух линий.
+  app.get('/api/history', (req, res) => {
+    const ids = String(req.query.ids || '').split(',').map((s) => s.trim()).filter(Boolean);
+    res.json(historyPayload(ids));
+  });
 
   // Where the ESP8266 will POST. Pushing straight to the sockets (rather than waiting for the next
   // tick) keeps Unity's latency at the device's send interval instead of interval + tick.

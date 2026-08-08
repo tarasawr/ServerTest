@@ -1,7 +1,11 @@
 'use strict';
 
 const { CATALOG, BY_ID, simulate, round, describe } = require('./catalog');
-const { DEVICE_TIMEOUT_MS, HISTORY_LEN, log, warn } = require('./config');
+const { DEVICE_TIMEOUT_MS, HISTORY_WINDOW_MS, HISTORY_EVERY_MS, TICK_MS, log, warn } = require('./config');
+
+// Историю пишет тик, поэтому чаще тика точки не появятся, сколько ни проси. Клиенту сообщаем
+// фактический шаг, а не заказанный — иначе он растянет ось времени не туда.
+const HISTORY_STEP_MS = Math.max(HISTORY_EVERY_MS, TICK_MS);
 
 const startedAt = Date.now();
 
@@ -14,12 +18,13 @@ const state = {
   rssi: -58,
   lastDeviceAt: 0, // epoch ms of the newest real device report; 0 = a board has never reported
   values: new Map(CATALOG.map((s) => [s.id, s.sim.start])),
-  history: [], // newest last, capped at HISTORY_LEN
+  history: [], // newest last, trimmed to HISTORY_WINDOW_MS
 };
 
 let wasLive = false;      // была ли плата живой на прошлом тике — чтобы поймать момент обрыва
 let reportCount = 0;      // сколько POST приняли с тех пор, как плата вышла на связь
 let lastIgnoredKeys = ''; // чтобы ругаться на незнакомые поля один раз, а не с частотой прошивки
+let lastSampleAt = 0;     // когда последний раз клали точку в историю
 
 // A board that reported inside the timeout owns the numbers; otherwise the simulator does. This is
 // what lets the firmware take over later without a flag flip or a redeploy — it just starts POSTing.
@@ -132,9 +137,39 @@ function tick() {
   if (!live) simulate(state.values);
 
   const snap = snapshot();
-  state.history.push({ ts: snap.ts, values: Object.fromEntries(snap.sensors.map((s) => [s.id, s.value])) });
-  if (state.history.length > HISTORY_LEN) state.history.shift();
+  recordHistory(snap);
   return snap;
 }
 
-module.exports = { state, snapshot, summary, ingest, tick, deviceIsLive };
+// Точка в историю кладётся по своему, куда более редкому расписанию, чем идут снапшоты, а всё
+// старше окна выбрасывается — так буфер сам держит ровно последний час без ограничения по длине.
+function recordHistory(snap) {
+  if (snap.ts - lastSampleAt < HISTORY_STEP_MS) return;
+  lastSampleAt = snap.ts;
+
+  state.history.push({ ts: snap.ts, values: Object.fromEntries(snap.sensors.map((s) => [s.id, s.value])) });
+
+  const cutoff = snap.ts - HISTORY_WINDOW_MS;
+  while (state.history.length && state.history[0].ts < cutoff) state.history.shift();
+}
+
+/**
+ * История для графика. Метки времени общие для всех рядов (замеры берутся одновременно), а
+ * значения — плоскими массивами: так вдвое меньше байт, чем массивом объектов, и, главное,
+ * Unity JsonUtility это разбирает, а словарь `{temperature1: ...}` — нет.
+ */
+function historyPayload(ids) {
+  const wanted = ids && ids.length ? CATALOG.filter((s) => ids.includes(s.id)) : CATALOG;
+  return {
+    type: 'history',
+    windowSec: Math.round(HISTORY_WINDOW_MS / 1000),
+    everySec: Math.round(HISTORY_STEP_MS / 1000),
+    ts: state.history.map((h) => h.ts),
+    series: wanted.map((s) => ({
+      ...describe(s),
+      values: state.history.map((h) => h.values[s.id] ?? 0),
+    })),
+  };
+}
+
+module.exports = { state, snapshot, summary, ingest, tick, deviceIsLive, historyPayload };

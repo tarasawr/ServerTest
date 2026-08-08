@@ -14,8 +14,11 @@ const TICK_MS = Number(process.env.TICK_MS) || 1000;
 // fine on a LAN but means anyone can spoof readings once this is public.
 const DEVICE_KEY = process.env.DEVICE_KEY || '';
 
-// Ring buffer of past snapshots, for charts later. 120 @ 1s = 2 minutes.
-const HISTORY_LEN = Number(process.env.HISTORY_LEN) || 120;
+// Глубина графика. Точку в историю кладём заметно реже, чем шлём снапшоты: час по секунде — это
+// 3600 точек на датчик, которые незачем ни хранить, ни гонять по сети, ни рисовать. Раз в 10 с
+// даёт 360 точек на час — как раз под ширину графика в пикселях.
+const HISTORY_WINDOW_MS = Number(process.env.HISTORY_WINDOW_MS) || 60 * 60 * 1000;
+const HISTORY_EVERY_MS = Number(process.env.HISTORY_EVERY_MS) || 10000;
 
 // Drop a socket that misses two heartbeats — Render's proxy does not always deliver a close frame.
 const HEARTBEAT_MS = Number(process.env.HEARTBEAT_MS) || 30000;
@@ -36,6 +39,6 @@ function warn(tag, msg) {
 }
 
 module.exports = {
-  PORT, DEVICE_TIMEOUT_MS, TICK_MS, DEVICE_KEY, HISTORY_LEN, HEARTBEAT_MS,
-  STATUS_EVERY_MS, REV, log, warn,
+  PORT, DEVICE_TIMEOUT_MS, TICK_MS, DEVICE_KEY, HEARTBEAT_MS,
+  HISTORY_WINDOW_MS, HISTORY_EVERY_MS, STATUS_EVERY_MS, REV, log, warn,
 };
