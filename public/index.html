@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP8266 — датчики</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 32px 20px; background: #14161a; color: #e8eaed;
+         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 640px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; font-weight: 600; }
+  #status { font-size: 13px; color: #9aa0a6; margin-bottom: 24px; }
+  #status b { color: #e8eaed; font-weight: 600; }
+  .row { display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: 12px;
+         padding: 14px 0; border-bottom: 1px solid #262a30; }
+  .label { color: #9aa0a6; }
+  .value { font-variant-numeric: tabular-nums; font-size: 22px; font-weight: 600; }
+  .unit { font-size: 13px; color: #9aa0a6; margin-left: 4px; font-weight: 400; }
+  .bar { grid-column: 1 / -1; height: 3px; background: #262a30; border-radius: 2px; overflow: hidden; }
+  .bar span { display: block; height: 100%; background: #5b9dd9; transition: width .3s ease; }
+  .on { color: #64d68a; } .off { color: #6b7076; }
+</style>
+</head>
+<body>
+<main>
+  <h1>ESP8266 — датчики</h1>
+  <div id="status">подключение…</div>
+  <div id="rows"></div>
+</main>
+<script>
+const rowsEl = document.getElementById('rows');
+const statusEl = document.getElementById('status');
+const rows = new Map();
+
+function render(snap) {
+  const src = snap.source === 'device' ? `устройство <b>${snap.deviceId}</b>, RSSI ${snap.rssi} dBm`
+                                       : 'симуляция (реальная плата не на связи)';
+  statusEl.innerHTML = `Источник: ${src} · аптайм ${snap.uptimeSec}s`;
+
+  for (const s of snap.sensors) {
+    let row = rows.get(s.id);
+    if (!row) {
+      const el = document.createElement('div');
+      el.className = 'row';
+      el.innerHTML = `<span class="label"></span><span class="value"></span><div class="bar"><span></span></div>`;
+      el.querySelector('.label').textContent = s.label;
+      rowsEl.appendChild(el);
+      row = { value: el.querySelector('.value'), fill: el.querySelector('.bar span') };
+      rows.set(s.id, row);
+    }
+    if (s.kind === 'bool') {
+      row.value.textContent = s.value ? 'есть' : 'нет';
+      row.value.className = 'value ' + (s.value ? 'on' : 'off');
+    } else {
+      row.value.innerHTML = s.value.toFixed(s.decimals) + `<span class="unit">${s.unit}</span>`;
+    }
+    const pct = Math.max(0, Math.min(100, ((s.value - s.min) / (s.max - s.min)) * 100));
+    row.fill.style.width = pct + '%';
+  }
+}
+
+// Same reconnect story as the Unity client: Render's free tier sleeps, so a dropped socket is
+// expected rather than exceptional.
+function connect() {
+  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+  ws.onmessage = (e) => { const m = JSON.parse(e.data); if (m.type === 'snapshot') render(m); };
+  ws.onclose = () => { statusEl.textContent = 'соединение потеряно, переподключаюсь…'; setTimeout(connect, 2000); };
+  ws.onerror = () => ws.close();
+}
+connect();
+</script>
+</body>
+</html>
