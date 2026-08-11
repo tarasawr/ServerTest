@@ -1,7 +1,10 @@
 'use strict';
 
 const { CATALOG, BY_ID, simulate, round, describe } = require('./catalog');
-const { DEVICE_TIMEOUT_MS, HISTORY_WINDOW_MS, HISTORY_EVERY_MS, TICK_MS, log, warn } = require('./config');
+const {
+  DEVICE_TIMEOUT_MS, HISTORY_WINDOW_MS, HISTORY_EVERY_MS, HISTORY_SEED,
+  DEVICE_CLOCK_TOLERANCE_MS, TICK_MS, log, warn,
+} = require('./config');
 
 // Историю пишет тик, поэтому чаще тика точки не появятся, сколько ни проси. Клиенту сообщаем
 // фактический шаг, а не заказанный — иначе он растянет ось времени не туда.
@@ -24,6 +27,8 @@ const state = {
   rssi: -58,
   device: {},      // произвольные сведения о плате из последнего POST
   lastDeviceAt: 0, // epoch ms of the newest real device report; 0 = a board has never reported
+  deviceTs: 0,     // часы самой платы из последнего POST (NTP, UTC мс); 0 = не синхронизированы
+  deviceTsAt: 0,   // когда этот отчёт приняли по серверным часам — по нему часы платы «дотикивают»
   values: new Map(CATALOG.map((s) => [s.id, s.sim.start])),
   history: [], // newest last, trimmed to HISTORY_WINDOW_MS
 };
@@ -45,7 +50,8 @@ function sanitizeDeviceInfo(raw) {
 let wasLive = false;      // была ли плата живой на прошлом тике — чтобы поймать момент обрыва
 let reportCount = 0;      // сколько POST приняли с тех пор, как плата вышла на связь
 let lastIgnoredKeys = ''; // чтобы ругаться на незнакомые поля один раз, а не с частотой прошивки
-let lastSampleAt = 0;     // когда последний раз клали точку в историю
+let lastSampleAt = 0;     // когда последний раз клали точку в историю (по серверным часам)
+let clockComplained = false; // про разъехавшиеся часы платы ругаемся один раз, а не каждый POST
 
 // A board that reported inside the timeout owns the numbers; otherwise the simulator does. This is
 // what lets the firmware take over later without a flag flip or a redeploy — it just starts POSTing.
@@ -53,8 +59,23 @@ function deviceIsLive() {
   return state.lastDeviceAt > 0 && Date.now() - state.lastDeviceAt < DEVICE_TIMEOUT_MS;
 }
 
+/**
+ * Часы платы «сейчас»: последняя присланная метка плюс то, что натикало с момента её приёма.
+ * Плата отчитывается раз в SEND_INTERVAL_MS, а снапшоты уходят каждый тик — без досчёта время
+ * в интерфейсе дёргалось бы рывками по десять секунд. 0 = часов нет: плата молчит или её NTP
+ * ещё не синхронизировался.
+ */
+function boardClockMs() {
+  if (!state.deviceTs) return 0;
+  const elapsed = Date.now() - state.deviceTsAt;
+  if (elapsed > DEVICE_TIMEOUT_MS) return 0;  // плата пропала — досчитывать нечего
+  return state.deviceTs + elapsed;
+}
+
 function snapshot() {
   const live = deviceIsLive();
+  const now = Date.now();
+  const board = live ? boardClockMs() : 0;
   return {
     type: 'snapshot',
     // Пока плата не на связи, её опознавательные данные — мусор из прошлого сеанса, поэтому
@@ -62,8 +83,13 @@ function snapshot() {
     deviceId: live ? state.deviceId : 'esp8266-sim',
     source: live ? 'device' : 'fake',
     online: live,
-    ts: Date.now(),
-    uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
+    // Основная метка времени — часы платы, когда они есть: график должен быть подписан временем
+    // того, кто мерил. Обе шкалы всё равно от NTP и расходятся на доли секунды, а серверная
+    // остаётся рядом отдельным полем — по ней видно расхождение, если плата врёт.
+    ts: board || now,
+    serverTs: now,
+    deviceTs: board,
+    uptimeSec: Math.floor((now - startedAt) / 1000),
     rssi: live ? state.rssi : 0,
     // Пустой объект, а не null: клиенту так не нужно проверять на null перед каждым полем.
     device: live ? state.device : {},
@@ -126,6 +152,7 @@ function ingest(payload) {
   const previousId = state.deviceId;
   if (typeof payload.deviceId === 'string' && payload.deviceId) state.deviceId = payload.deviceId;
   if (Number.isFinite(Number(payload.rssi))) state.rssi = Number(payload.rssi);
+  acceptDeviceClock(Number(payload.ts));
 
   const info = sanitizeDeviceInfo(payload.device);
   if (info) state.device = info;
@@ -151,6 +178,31 @@ function ingest(payload) {
   return applied;
 }
 
+/**
+ * Метка времени из POST. Плата присылает 0, пока NTP не ответил, — это не ошибка, а «часов ещё
+ * нет». А вот время, разъехавшееся с серверным больше чем на допуск, отбрасываем: с ним график
+ * уехал бы в позапрошлый год или в будущее, и понять, что виноваты часы платы, было бы неоткуда.
+ */
+function acceptDeviceClock(ts) {
+  if (!Number.isFinite(ts) || ts <= 0) return;
+
+  const now = Date.now();
+  const drift = ts - now;
+  if (Math.abs(drift) > DEVICE_CLOCK_TOLERANCE_MS) {
+    if (!clockComplained) {
+      clockComplained = true;
+      warn('Device', `board clock is off by ${Math.round(drift / 1000)}s (${new Date(ts).toISOString()}) `
+        + '— ignoring its timestamps, chart falls back to server time');
+    }
+    return;
+  }
+
+  if (!state.deviceTs) log('Device', `board clock in sync: ${new Date(ts).toISOString()} (${drift >= 0 ? '+' : ''}${drift}ms vs server)`);
+  clockComplained = false;
+  state.deviceTs = ts;
+  state.deviceTsAt = now;
+}
+
 // Advances the world by one tick and returns the snapshot to broadcast.
 function tick() {
   const live = deviceIsLive();
@@ -160,6 +212,7 @@ function tick() {
     const silentFor = Math.round((Date.now() - state.lastDeviceAt) / 1000);
     warn('Device', `${state.deviceId} OFFLINE — silent for ${silentFor}s after ${reportCount} report(s), simulator resumed`);
     reportCount = 0;
+    state.deviceTs = 0;  // часы ушли вместе с платой; вернётся — снова отметим синхронизацию в логе
   }
   wasLive = live;
 
@@ -172,14 +225,47 @@ function tick() {
 
 // Точка в историю кладётся по своему, куда более редкому расписанию, чем идут снапшоты, а всё
 // старше окна выбрасывается — так буфер сам держит ровно последний час без ограничения по длине.
+//
+// Расписание считается по серверным часам, а подписывается точка временем из снапшота (то есть
+// платы). Иначе уход платы в офлайн — а с ним и переход метки с её часов на серверные — сдвинул
+// бы расписание на разницу часов, и запись истории замерла бы на эти секунды.
 function recordHistory(snap) {
-  if (snap.ts - lastSampleAt < HISTORY_STEP_MS) return;
-  lastSampleAt = snap.ts;
+  const now = Date.now();
+  if (now - lastSampleAt < HISTORY_STEP_MS) return;
+  lastSampleAt = now;
 
   state.history.push({ ts: snap.ts, values: Object.fromEntries(snap.sensors.map((s) => [s.id, s.value])) });
 
   const cutoff = snap.ts - HISTORY_WINDOW_MS;
   while (state.history.length && state.history[0].ts < cutoff) state.history.shift();
+}
+
+/**
+ * Заполняет окно истории правдоподобной «прошлой» жизнью — тем же случайным блужданием, что и
+ * симулятор, только развёрнутым назад во времени (блуждание симметрично, направление ему всё
+ * равно). Нужно ради графика: сервер на бесплатном Render засыпает без нагрузки и просыпается
+ * с пустой историей, так что настоящих точек в первую минуту не бывает почти никогда.
+ *
+ * Самая свежая засеянная точка — это текущие state.values, поэтому шов с живыми данными не виден.
+ */
+function seedHistory() {
+  const now = Date.now();
+  const points = Math.max(1, Math.floor(HISTORY_WINDOW_MS / HISTORY_STEP_MS));
+  const walk = new Map(state.values);
+  const rows = [];
+
+  for (let i = 0; i < points; i++) {
+    rows.push({
+      ts: now - i * HISTORY_STEP_MS,
+      values: Object.fromEntries(CATALOG.map((s) => [s.id, round(walk.get(s.id) ?? 0, s.decimals)])),
+    });
+    simulate(walk);
+  }
+
+  rows.reverse();  // в истории старое идёт первым
+  state.history = rows;
+  lastSampleAt = now;
+  return points;
 }
 
 /**
@@ -201,4 +287,4 @@ function historyPayload(ids) {
   };
 }
 
-module.exports = { state, snapshot, summary, ingest, tick, deviceIsLive, historyPayload };
+module.exports = { state, snapshot, summary, ingest, tick, deviceIsLive, historyPayload, seedHistory };

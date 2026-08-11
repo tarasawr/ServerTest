@@ -20,6 +20,17 @@ const DEVICE_KEY = process.env.DEVICE_KEY || '';
 const HISTORY_WINDOW_MS = Number(process.env.HISTORY_WINDOW_MS) || 60 * 60 * 1000;
 const HISTORY_EVERY_MS = Number(process.env.HISTORY_EVERY_MS) || 10000;
 
+// История копится только пока сервер живёт, а бесплатный Render гасит его после 15 минут тишины —
+// то есть почти каждый запуск Unity видел бы пустой график и «ждём данные...» на весь экран.
+// Поэтому при старте окно заполняется правдоподобным блужданием назад во времени. Это имитация,
+// а не измерения: HISTORY_SEED=0 выключает её, когда на графике нужны только настоящие точки.
+const HISTORY_SEED = process.env.HISTORY_SEED !== '0';
+
+// Насколько часам платы позволено расходиться с серверными, прежде чем её метку времени считать
+// мусором. И плата, и сервер синхронизируются по NTP, так что реальная разница — доли секунды;
+// пять минут — это запас на кривой NTP и на плату, которая шлёт время до первой синхронизации.
+const DEVICE_CLOCK_TOLERANCE_MS = Number(process.env.DEVICE_CLOCK_TOLERANCE_MS) || 5 * 60 * 1000;
+
 // Drop a socket that misses two heartbeats — Render's proxy does not always deliver a close frame.
 const HEARTBEAT_MS = Number(process.env.HEARTBEAT_MS) || 30000;
 
@@ -40,5 +51,6 @@ function warn(tag, msg) {
 
 module.exports = {
   PORT, DEVICE_TIMEOUT_MS, TICK_MS, DEVICE_KEY, HEARTBEAT_MS,
-  HISTORY_WINDOW_MS, HISTORY_EVERY_MS, STATUS_EVERY_MS, REV, log, warn,
+  HISTORY_WINDOW_MS, HISTORY_EVERY_MS, HISTORY_SEED, DEVICE_CLOCK_TOLERANCE_MS,
+  STATUS_EVERY_MS, REV, log, warn,
 };
