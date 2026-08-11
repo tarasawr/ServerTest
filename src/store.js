@@ -11,15 +11,36 @@ const startedAt = Date.now();
 
 // Поля верхнего уровня, которые плата шлёт рядом с показаниями — чтобы не ругаться на них как на
 // неизвестные датчики.
-const META_KEYS = new Set(['deviceId', 'rssi', 'sensors', 'type', 'ts']);
+const META_KEYS = new Set(['deviceId', 'rssi', 'sensors', 'type', 'ts', 'device']);
+
+// Паспорт платы (`device`) сервер не разбирает по полям: что прошивка положила, то Unity и покажет.
+// Добавить строчку про новый датчик или напряжение питания можно правкой одной прошивки.
+// Ограничения — чтобы кто угодно с доступом к POST не смог раздуть снапшот до мегабайта.
+const DEVICE_INFO_MAX_KEYS = 32;
+const DEVICE_INFO_MAX_VALUE = 96;
 
 const state = {
   deviceId: 'esp8266-sim',
   rssi: -58,
+  device: {},      // произвольные сведения о плате из последнего POST
   lastDeviceAt: 0, // epoch ms of the newest real device report; 0 = a board has never reported
   values: new Map(CATALOG.map((s) => [s.id, s.sim.start])),
   history: [], // newest last, trimmed to HISTORY_WINDOW_MS
 };
+
+// Пропускаем только плоские скаляры: вложенные объекты и массивы Unity всё равно не разберёт
+// своим JsonUtility, а строки режем по длине, чтобы одно кривое поле не распухло на весь снапшот.
+function sanitizeDeviceInfo(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const out = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (Object.keys(out).length >= DEVICE_INFO_MAX_KEYS) break;
+    if (typeof value === 'string') out[key] = value.slice(0, DEVICE_INFO_MAX_VALUE);
+    else if (typeof value === 'boolean') out[key] = value;
+    else if (Number.isFinite(value)) out[key] = value;
+  }
+  return Object.keys(out).length ? out : null;
+}
 
 let wasLive = false;      // была ли плата живой на прошлом тике — чтобы поймать момент обрыва
 let reportCount = 0;      // сколько POST приняли с тех пор, как плата вышла на связь
@@ -44,6 +65,8 @@ function snapshot() {
     ts: Date.now(),
     uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
     rssi: live ? state.rssi : 0,
+    // Пустой объект, а не null: клиенту так не нужно проверять на null перед каждым полем.
+    device: live ? state.device : {},
     sensors: CATALOG.map((s) => ({
       ...describe(s),
       value: round(state.values.get(s.id) ?? 0, s.decimals),
@@ -104,6 +127,9 @@ function ingest(payload) {
   if (typeof payload.deviceId === 'string' && payload.deviceId) state.deviceId = payload.deviceId;
   if (Number.isFinite(Number(payload.rssi))) state.rssi = Number(payload.rssi);
 
+  const info = sanitizeDeviceInfo(payload.device);
+  if (info) state.device = info;
+
   // Only a report that actually carried a known reading counts as proof of life — otherwise an
   // empty or malformed POST would keep the simulator suppressed while nothing real arrives.
   if (applied.length) {
@@ -114,6 +140,9 @@ function ingest(payload) {
       const missing = CATALOG.filter((s) => !applied.includes(s.id)).map((s) => s.id);
       log('Device', `${state.deviceId} ONLINE — simulator off, reporting ${applied.length}/${CATALOG.length}: ${applied.join(', ')}`
         + (missing.length ? ` | still simulated: ${missing.join(', ')}` : ''));
+      // Паспорт платы в логе — быстрый ответ на «а какая прошивка сейчас в железке и где она стоит».
+      const { board, fw, ip } = state.device;
+      if (board || fw || ip) log('Device', `  ${board || 'плата'} · fw ${fw || '?'} · ${ip || 'ip ?'}`);
     } else {
       reportCount++;
       if (previousId !== state.deviceId) log('Device', `board changed: ${previousId} -> ${state.deviceId}`);
