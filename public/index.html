@@ -33,9 +33,18 @@ const rowsEl = document.getElementById('rows');
 const statusEl = document.getElementById('status');
 const rows = new Map();
 
+function ago(ms) {
+  const sec = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (sec < 60) return sec + ' с назад';
+  if (sec < 3600) return Math.round(sec / 60) + ' мин назад';
+  return Math.round(sec / 3600) + ' ч назад';
+}
+
 function render(snap) {
-  const src = snap.source === 'device' ? `устройство <b>${snap.deviceId}</b>, RSSI ${snap.rssi} dBm`
-                                       : 'симуляция (реальная плата не на связи)';
+  let src;
+  if (snap.source === 'device') src = `устройство <b>${snap.deviceId}</b>, RSSI ${snap.rssi} dBm`;
+  else if (snap.source === 'stale') src = `<b>плата не на связи</b> — показания ${ago(snap.ts)}`;
+  else src = '<b>плата не на связи</b> — данных ещё не было';
   statusEl.innerHTML = `Источник: ${src} · аптайм ${snap.uptimeSec}s`;
 
   for (const s of snap.sensors) {

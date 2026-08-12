@@ -1,6 +1,6 @@
 'use strict';
 // Manual smoke check: `npm start` in one shell, `node smoke.js` in another.
-// Verifies the socket pushes snapshots, and that a device POST takes the numbers over from the sim.
+// Verifies the socket pushes snapshots, and that a device POST turns zeros into real readings.
 
 const WebSocket = require('ws');
 
@@ -36,6 +36,6 @@ setTimeout(() => {
   const ok = last.source === 'device' && last.online === true
     && last.deviceId === 'esp8266-kitchen' && temp.value === 41.5 && motion.value === 1;
   console.log(`\n${snapshots.length} snapshots received.`);
-  console.log(ok ? 'PASS — device readings took over the simulator' : 'FAIL — ' + JSON.stringify(last, null, 2));
+  console.log(ok ? 'PASS — device readings are live on the socket' : 'FAIL — ' + JSON.stringify(last, null, 2));
   process.exit(ok ? 0 : 1);
 }, 6000);

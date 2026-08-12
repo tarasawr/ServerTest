@@ -4,10 +4,10 @@ const http = require('http');
 
 const {
   PORT, TICK_MS, DEVICE_KEY, DEVICE_TIMEOUT_MS, HEARTBEAT_MS,
-  HISTORY_WINDOW_MS, HISTORY_EVERY_MS, HISTORY_SEED, STATUS_EVERY_MS, REV, log, warn,
+  HISTORY_WINDOW_MS, HISTORY_EVERY_MS, STATUS_EVERY_MS, REV, log, warn,
 } = require('./src/config');
 const { CATALOG } = require('./src/catalog');
-const { tick, summary, seedHistory } = require('./src/store');
+const { tick, summary } = require('./src/store');
 const { createApp } = require('./src/httpRoutes');
 const { attachWsServer } = require('./src/wsServer');
 
@@ -19,8 +19,7 @@ const server = http.createServer(app);
 const ws = attachWsServer(server);
 broadcast = ws.broadcast;
 
-// One clock drives everything: advance the simulator (unless a real board is reporting) and push
-// the resulting snapshot to every client.
+// Один таймер на всё: собрать текущее состояние и разослать его клиентам.
 const ticker = setInterval(() => {
   try {
     broadcast(tick());
@@ -68,12 +67,10 @@ server.listen(PORT, () => {
   if (HISTORY_EVERY_MS < TICK_MS) {
     warn('Server', `HISTORY_EVERY_MS=${HISTORY_EVERY_MS}ms is finer than TICK_MS=${TICK_MS}ms — history samples at ${step}ms`);
   }
-  // Без засева график в Unity первые минуты пуст: на бесплатном Render каждый запуск — с нуля.
-  if (HISTORY_SEED) log('Server', `history seeded with ${seedHistory()} simulated point(s) — set HISTORY_SEED=0 to start empty`);
-  else log('Server', 'HISTORY_SEED=0 — history starts empty and fills as the server runs');
   log('Server', `sensors (${CATALOG.length}): ${CATALOG.map((s) => `${s.id}[${s.unit || 'bool'}]`).join(' ')}`);
   log('Server', 'routes: GET /health /api/sensors /api/history · POST /api/sensors · WS /ws · dashboard /');
   if (DEVICE_KEY) log('Server', 'DEVICE_KEY set — POST /api/sensors requires the X-Device-Key header');
   else warn('Server', 'DEVICE_KEY not set — POST /api/sensors accepts readings from anyone');
-  log('Server', `waiting for a board; until one reports, readings are simulated (source=fake)`);
+  // Никаких выдуманных цифр: до первого POST снапшот уходит с нулями и source=none, история пуста.
+  log('Server', 'waiting for a board; until one reports, readings are zeros (source=none)');
 });

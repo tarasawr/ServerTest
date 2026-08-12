@@ -4,7 +4,7 @@ const path = require('path');
 const express = require('express');
 
 const { DEVICE_KEY, REV, warn } = require('./config');
-const { snapshot, ingest, deviceIsLive, historyPayload } = require('./store');
+const { snapshot, ingest, deviceIsLive, hasReadings, historyPayload } = require('./store');
 
 // Плата за NAT-ом, поэтому в логе полезнее видеть внешний адрес, который проставил прокси Render,
 // чем адрес самого прокси.
@@ -38,7 +38,8 @@ function createApp(broadcast) {
 
   // Liveness for Render's health check — status code is what matters, body is for humans.
   app.get('/health', (req, res) => {
-    res.type('text/plain').send(`ok rev=${REV} source=${deviceIsLive() ? 'device' : 'fake'}`);
+    const source = deviceIsLive() ? 'device' : (hasReadings() ? 'stale' : 'none');
+    res.type('text/plain').send(`ok rev=${REV} source=${source}`);
   });
 
   // The same payload the WebSocket pushes. Handy for curl, and a fallback if a client cannot

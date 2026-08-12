@@ -1,8 +1,8 @@
 'use strict';
 
-const { CATALOG, BY_ID, simulate, round, describe } = require('./catalog');
+const { CATALOG, BY_ID, round, describe } = require('./catalog');
 const {
-  DEVICE_TIMEOUT_MS, HISTORY_WINDOW_MS, HISTORY_EVERY_MS, HISTORY_SEED,
+  DEVICE_TIMEOUT_MS, HISTORY_WINDOW_MS, HISTORY_EVERY_MS,
   DEVICE_CLOCK_TOLERANCE_MS, TICK_MS, log, warn,
 } = require('./config');
 
@@ -22,14 +22,17 @@ const META_KEYS = new Set(['deviceId', 'rssi', 'sensors', 'type', 'ts', 'device'
 const DEVICE_INFO_MAX_KEYS = 32;
 const DEVICE_INFO_MAX_VALUE = 96;
 
+// Цифры здесь только настоящие. Пока плата не отчиталась ни разу, в значениях нули — так и уедут
+// клиенту: ноль, подписанный source=none, честнее правдоподобной выдумки, которую невозможно
+// отличить от настоящего замера.
 const state = {
-  deviceId: 'esp8266-sim',
-  rssi: -58,
+  deviceId: 'esp8266',
+  rssi: 0,
   device: {},      // произвольные сведения о плате из последнего POST
   lastDeviceAt: 0, // epoch ms of the newest real device report; 0 = a board has never reported
   deviceTs: 0,     // часы самой платы из последнего POST (NTP, UTC мс); 0 = не синхронизированы
   deviceTsAt: 0,   // когда этот отчёт приняли по серверным часам — по нему часы платы «дотикивают»
-  values: new Map(CATALOG.map((s) => [s.id, s.sim.start])),
+  values: new Map(CATALOG.map((s) => [s.id, 0])),
   history: [], // newest last, trimmed to HISTORY_WINDOW_MS
 };
 
@@ -53,10 +56,26 @@ let lastIgnoredKeys = ''; // чтобы ругаться на незнакомы
 let lastSampleAt = 0;     // когда последний раз клали точку в историю (по серверным часам)
 let clockComplained = false; // про разъехавшиеся часы платы ругаемся один раз, а не каждый POST
 
-// A board that reported inside the timeout owns the numbers; otherwise the simulator does. This is
-// what lets the firmware take over later without a flag flip or a redeploy — it just starts POSTing.
+// Плата, отчитавшаяся не позже таймаута, считается живой. Замолчала — цифры остаются на последних
+// принятых: подменять их нечем и незачем.
 function deviceIsLive() {
   return state.lastDeviceAt > 0 && Date.now() - state.lastDeviceAt < DEVICE_TIMEOUT_MS;
+}
+
+/** Приходила ли вообще хоть одна настоящая цифра с момента запуска сервера. */
+function hasReadings() {
+  return state.lastDeviceAt > 0;
+}
+
+/**
+ * Когда сняты те показания, что лежат в state.values. Пока плата живая — это её часы «сейчас»,
+ * после обрыва — момент последнего отчёта: время замера не должно продолжать идти вперёд вместе
+ * с серверными часами, иначе замер часовой давности выглядел бы свежим.
+ */
+function readingTs() {
+  if (!hasReadings()) return 0;
+  if (deviceIsLive()) return boardClockMs() || state.lastDeviceAt;
+  return state.deviceTs || state.lastDeviceAt;
 }
 
 /**
@@ -78,21 +97,22 @@ function snapshot() {
   const board = live ? boardClockMs() : 0;
   return {
     type: 'snapshot',
-    // Пока плата не на связи, её опознавательные данные — мусор из прошлого сеанса, поэтому
-    // отдаём их только вместе с живым источником.
-    deviceId: live ? state.deviceId : 'esp8266-sim',
-    source: live ? 'device' : 'fake',
+    deviceId: state.deviceId,
+    // device — плата на связи прямо сейчас; stale — связи нет, показания последние принятые;
+    // none — плата не отчитывалась ни разу, в значениях нули.
+    source: live ? 'device' : (hasReadings() ? 'stale' : 'none'),
     online: live,
-    // Основная метка времени — часы платы, когда они есть: график должен быть подписан временем
-    // того, кто мерил. Обе шкалы всё равно от NTP и расходятся на доли секунды, а серверная
-    // остаётся рядом отдельным полем — по ней видно расхождение, если плата врёт.
-    ts: board || now,
+    // Основная метка времени — когда сняты показания, а не когда собран этот снапшот: график
+    // должен быть подписан временем того, кто мерил. Пока плата живая, это её NTP-часы; после
+    // обрыва метка застывает на последнем отчёте, поэтому по ней видно, насколько цифры устарели.
+    ts: readingTs() || now,
     serverTs: now,
     deviceTs: board,
     uptimeSec: Math.floor((now - startedAt) / 1000),
     rssi: live ? state.rssi : 0,
-    // Пустой объект, а не null: клиенту так не нужно проверять на null перед каждым полем.
-    device: live ? state.device : {},
+    // Паспорт платы остаётся и после обрыва: показания на экране её, значит и подпись под ними
+    // должна быть её. Пустой объект, а не null — клиенту не нужно проверять на null каждое поле.
+    device: state.device,
     sensors: CATALOG.map((s) => ({
       ...describe(s),
       value: round(state.values.get(s.id) ?? 0, s.decimals),
@@ -104,9 +124,10 @@ function snapshot() {
 function summary(clientCount) {
   const snap = snapshot();
   const readings = snap.sensors.map((s) => `${s.id}=${s.value}${s.unit}`).join(' ');
-  const source = snap.source === 'device'
-    ? `device(${snap.deviceId} rssi=${snap.rssi} reports=${reportCount})`
-    : 'simulator';
+  let source;
+  if (snap.source === 'device') source = `device(${snap.deviceId} rssi=${snap.rssi} reports=${reportCount})`;
+  else if (snap.source === 'stale') source = `stale(last reading ${Math.round((Date.now() - snap.ts) / 1000)}s ago)`;
+  else source = 'none (no board has reported yet)';
   return `clients=${clientCount} source=${source} uptime=${snap.uptimeSec}s | ${readings}`;
 }
 
@@ -158,15 +179,17 @@ function ingest(payload) {
   if (info) state.device = info;
 
   // Only a report that actually carried a known reading counts as proof of life — otherwise an
-  // empty or malformed POST would keep the simulator suppressed while nothing real arrives.
+  // empty or malformed POST would mark a mute board as online.
   if (applied.length) {
     const live = deviceIsLive();
     state.lastDeviceAt = Date.now();
     if (!live) {
       reportCount = 1;
+      // Датчики, которых в отчёте не было, остаются на своих прошлых значениях (или на нулях,
+      // если их не присылали ни разу) — подставлять туда нечего.
       const missing = CATALOG.filter((s) => !applied.includes(s.id)).map((s) => s.id);
-      log('Device', `${state.deviceId} ONLINE — simulator off, reporting ${applied.length}/${CATALOG.length}: ${applied.join(', ')}`
-        + (missing.length ? ` | still simulated: ${missing.join(', ')}` : ''));
+      log('Device', `${state.deviceId} ONLINE — reporting ${applied.length}/${CATALOG.length}: ${applied.join(', ')}`
+        + (missing.length ? ` | no data for: ${missing.join(', ')}` : ''));
       // Паспорт платы в логе — быстрый ответ на «а какая прошивка сейчас в железке и где она стоит».
       const { board, fw, ip } = state.device;
       if (board || fw || ip) log('Device', `  ${board || 'плата'} · fw ${fw || '?'} · ${ip || 'ip ?'}`);
@@ -203,23 +226,21 @@ function acceptDeviceClock(ts) {
   state.deviceTsAt = now;
 }
 
-// Advances the world by one tick and returns the snapshot to broadcast.
+// Собирает снапшот для рассылки. Ничего не «продвигает»: без платы состояние мира не меняется.
 function tick() {
   const live = deviceIsLive();
 
-  // Уход платы иначе не виден вообще: симулятор бесшумно подхватывает цифры, и в логе тишина.
   if (wasLive && !live) {
     const silentFor = Math.round((Date.now() - state.lastDeviceAt) / 1000);
-    warn('Device', `${state.deviceId} OFFLINE — silent for ${silentFor}s after ${reportCount} report(s), simulator resumed`);
+    warn('Device', `${state.deviceId} OFFLINE — silent for ${silentFor}s after ${reportCount} report(s), holding last readings`);
     reportCount = 0;
-    state.deviceTs = 0;  // часы ушли вместе с платой; вернётся — снова отметим синхронизацию в логе
   }
   wasLive = live;
 
-  if (!live) simulate(state.values);
-
   const snap = snapshot();
-  recordHistory(snap);
+  // В историю попадают только настоящие замеры. Пока плата молчит, повторять последнее значение
+  // раз в десять секунд нельзя: на графике это ровная линия, неотличимая от «датчик стабилен».
+  if (live) recordHistory(snap);
   return snap;
 }
 
@@ -241,34 +262,6 @@ function recordHistory(snap) {
 }
 
 /**
- * Заполняет окно истории правдоподобной «прошлой» жизнью — тем же случайным блужданием, что и
- * симулятор, только развёрнутым назад во времени (блуждание симметрично, направление ему всё
- * равно). Нужно ради графика: сервер на бесплатном Render засыпает без нагрузки и просыпается
- * с пустой историей, так что настоящих точек в первую минуту не бывает почти никогда.
- *
- * Самая свежая засеянная точка — это текущие state.values, поэтому шов с живыми данными не виден.
- */
-function seedHistory() {
-  const now = Date.now();
-  const points = Math.max(1, Math.floor(HISTORY_WINDOW_MS / HISTORY_STEP_MS));
-  const walk = new Map(state.values);
-  const rows = [];
-
-  for (let i = 0; i < points; i++) {
-    rows.push({
-      ts: now - i * HISTORY_STEP_MS,
-      values: Object.fromEntries(CATALOG.map((s) => [s.id, round(walk.get(s.id) ?? 0, s.decimals)])),
-    });
-    simulate(walk);
-  }
-
-  rows.reverse();  // в истории старое идёт первым
-  state.history = rows;
-  lastSampleAt = now;
-  return points;
-}
-
-/**
  * История для графика. Метки времени общие для всех рядов (замеры берутся одновременно), а
  * значения — плоскими массивами: так вдвое меньше байт, чем массивом объектов, и, главное,
  * Unity JsonUtility это разбирает, а словарь `{temperature1: ...}` — нет.
@@ -287,4 +280,4 @@ function historyPayload(ids) {
   };
 }
 
-module.exports = { state, snapshot, summary, ingest, tick, deviceIsLive, historyPayload, seedHistory };
+module.exports = { state, snapshot, summary, ingest, tick, deviceIsLive, hasReadings, historyPayload };

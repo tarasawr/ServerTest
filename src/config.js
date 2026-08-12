@@ -3,8 +3,8 @@
 // Render injects PORT; 3000 is the local default.
 const PORT = Number(process.env.PORT) || 3000;
 
-// A board that hasn't POSTed within this window counts as gone, and the simulator takes the
-// numbers back over. Set it to a few times the firmware's send interval.
+// A board that hasn't POSTed within this window counts as gone: readings freeze at their last
+// values and the snapshot says so. Set it to a few times the firmware's send interval.
 const DEVICE_TIMEOUT_MS = Number(process.env.DEVICE_TIMEOUT_MS) || 15000;
 
 // How often a fresh snapshot is generated and pushed to every connected client.
@@ -19,12 +19,6 @@ const DEVICE_KEY = process.env.DEVICE_KEY || '';
 // даёт 360 точек на час — как раз под ширину графика в пикселях.
 const HISTORY_WINDOW_MS = Number(process.env.HISTORY_WINDOW_MS) || 60 * 60 * 1000;
 const HISTORY_EVERY_MS = Number(process.env.HISTORY_EVERY_MS) || 10000;
-
-// История копится только пока сервер живёт, а бесплатный Render гасит его после 15 минут тишины —
-// то есть почти каждый запуск Unity видел бы пустой график и «ждём данные...» на весь экран.
-// Поэтому при старте окно заполняется правдоподобным блужданием назад во времени. Это имитация,
-// а не измерения: HISTORY_SEED=0 выключает её, когда на графике нужны только настоящие точки.
-const HISTORY_SEED = process.env.HISTORY_SEED !== '0';
 
 // Насколько часам платы позволено расходиться с серверными, прежде чем её метку времени считать
 // мусором. И плата, и сервер синхронизируются по NTP, так что реальная разница — доли секунды;
@@ -51,6 +45,6 @@ function warn(tag, msg) {
 
 module.exports = {
   PORT, DEVICE_TIMEOUT_MS, TICK_MS, DEVICE_KEY, HEARTBEAT_MS,
-  HISTORY_WINDOW_MS, HISTORY_EVERY_MS, HISTORY_SEED, DEVICE_CLOCK_TOLERANCE_MS,
+  HISTORY_WINDOW_MS, HISTORY_EVERY_MS, DEVICE_CLOCK_TOLERANCE_MS,
   STATUS_EVERY_MS, REV, log, warn,
 };
