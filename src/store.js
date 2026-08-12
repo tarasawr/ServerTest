@@ -173,7 +173,7 @@ function ingest(payload) {
   const previousId = state.deviceId;
   if (typeof payload.deviceId === 'string' && payload.deviceId) state.deviceId = payload.deviceId;
   if (Number.isFinite(Number(payload.rssi))) state.rssi = Number(payload.rssi);
-  acceptDeviceClock(Number(payload.ts));
+  const clockAccepted = acceptDeviceClock(Number(payload.ts));
 
   const info = sanitizeDeviceInfo(payload.device);
   if (info) state.device = info;
@@ -197,7 +197,7 @@ function ingest(payload) {
       reportCount++;
       if (previousId !== state.deviceId) log('Device', `board changed: ${previousId} -> ${state.deviceId}`);
     }
-    logReading(applied);
+    logReading(applied, clockAccepted);
   }
   return applied;
 }
@@ -210,7 +210,7 @@ function ingest(payload) {
  * Возраст метки времени показываем рядом со значениями: расхождение часов платы и сервера иначе
  * замечаешь, только когда уже недоумеваешь, почему график съехал.
  */
-function logReading(applied) {
+function logReading(applied, clockAccepted) {
   if (!LOG_READINGS) return;
 
   const values = applied.map((id) => {
@@ -221,9 +221,11 @@ function logReading(applied) {
       : `${id}=${value}${sensor.unit}`;
   }).join(' ');
 
-  const clock = state.deviceTs
+  // Часы показываем только те, что приехали в ЭТОМ отчёте. Иначе замер без метки времени
+  // унаследовал бы время предыдущего и выглядел бы подписанным платой, хотя это не так.
+  const clock = clockAccepted
     ? `часы платы ${new Date(state.deviceTs).toISOString().slice(11, 19)}`
-    : 'часы платы не синхронизированы';
+    : 'без метки времени (подписан серверными часами)';
 
   log('Reading', `#${reportCount} ${values} | rssi=${state.rssi} | ${clock}`);
 }
@@ -232,9 +234,11 @@ function logReading(applied) {
  * Метка времени из POST. Плата присылает 0, пока NTP не ответил, — это не ошибка, а «часов ещё
  * нет». А вот время, разъехавшееся с серверным больше чем на допуск, отбрасываем: с ним график
  * уехал бы в позапрошлый год или в будущее, и понять, что виноваты часы платы, было бы неоткуда.
+ *
+ * @returns {boolean} приняли ли метку из этого отчёта
  */
 function acceptDeviceClock(ts) {
-  if (!Number.isFinite(ts) || ts <= 0) return;
+  if (!Number.isFinite(ts) || ts <= 0) return false;
 
   const now = Date.now();
   const drift = ts - now;
@@ -244,13 +248,14 @@ function acceptDeviceClock(ts) {
       warn('Device', `board clock is off by ${Math.round(drift / 1000)}s (${new Date(ts).toISOString()}) `
         + '— ignoring its timestamps, chart falls back to server time');
     }
-    return;
+    return false;
   }
 
   if (!state.deviceTs) log('Device', `board clock in sync: ${new Date(ts).toISOString()} (${drift >= 0 ? '+' : ''}${drift}ms vs server)`);
   clockComplained = false;
   state.deviceTs = ts;
   state.deviceTsAt = now;
+  return true;
 }
 
 // Собирает снапшот для рассылки. Ничего не «продвигает»: без платы состояние мира не меняется.
