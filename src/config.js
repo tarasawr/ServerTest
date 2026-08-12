@@ -20,6 +20,11 @@ const DEVICE_KEY = process.env.DEVICE_KEY || '';
 const HISTORY_WINDOW_MS = Number(process.env.HISTORY_WINDOW_MS) || 60 * 60 * 1000;
 const HISTORY_EVERY_MS = Number(process.env.HISTORY_EVERY_MS) || 10000;
 
+// Печатать в лог каждый принятый замер. Плата шлёт раз в 10 с, то есть это шесть строк в минуту —
+// пока налаживаешь связку, только так и видно, что цифры доезжают и какие именно. Надоест или
+// начнёт мешать читать остальное — LOG_READINGS=0, сводка раз в минуту (Status) всё равно остаётся.
+const LOG_READINGS = process.env.LOG_READINGS !== '0';
+
 // Насколько часам платы позволено расходиться с серверными, прежде чем её метку времени считать
 // мусором. И плата, и сервер синхронизируются по NTP, так что реальная разница — доли секунды;
 // пять минут — это запас на кривой NTP и на плату, которая шлёт время до первой синхронизации.
@@ -46,5 +51,5 @@ function warn(tag, msg) {
 module.exports = {
   PORT, DEVICE_TIMEOUT_MS, TICK_MS, DEVICE_KEY, HEARTBEAT_MS,
   HISTORY_WINDOW_MS, HISTORY_EVERY_MS, DEVICE_CLOCK_TOLERANCE_MS,
-  STATUS_EVERY_MS, REV, log, warn,
+  LOG_READINGS, STATUS_EVERY_MS, REV, log, warn,
 };

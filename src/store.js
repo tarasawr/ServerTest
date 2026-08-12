@@ -3,7 +3,7 @@
 const { CATALOG, BY_ID, round, describe } = require('./catalog');
 const {
   DEVICE_TIMEOUT_MS, HISTORY_WINDOW_MS, HISTORY_EVERY_MS,
-  DEVICE_CLOCK_TOLERANCE_MS, TICK_MS, log, warn,
+  DEVICE_CLOCK_TOLERANCE_MS, LOG_READINGS, TICK_MS, log, warn,
 } = require('./config');
 
 // Историю пишет тик, поэтому чаще тика точки не появятся, сколько ни проси. Клиенту сообщаем
@@ -197,8 +197,35 @@ function ingest(payload) {
       reportCount++;
       if (previousId !== state.deviceId) log('Device', `board changed: ${previousId} -> ${state.deviceId}`);
     }
+    logReading(applied);
   }
   return applied;
+}
+
+/**
+ * Строка в лог на каждый принятый замер: что именно доехало и с каким временем. Печатаются только
+ * поля из этого отчёта, а не весь каталог, — иначе датчики, которых на плате нет, каждые десять
+ * секунд напоминали бы о себе нулями.
+ *
+ * Возраст метки времени показываем рядом со значениями: расхождение часов платы и сервера иначе
+ * замечаешь, только когда уже недоумеваешь, почему график съехал.
+ */
+function logReading(applied) {
+  if (!LOG_READINGS) return;
+
+  const values = applied.map((id) => {
+    const sensor = BY_ID.get(id);
+    const value = round(state.values.get(id), sensor.decimals);
+    return sensor.kind === 'bool'
+      ? `${id}=${value ? 'да' : 'нет'}`
+      : `${id}=${value}${sensor.unit}`;
+  }).join(' ');
+
+  const clock = state.deviceTs
+    ? `часы платы ${new Date(state.deviceTs).toISOString().slice(11, 19)}`
+    : 'часы платы не синхронизированы';
+
+  log('Reading', `#${reportCount} ${values} | rssi=${state.rssi} | ${clock}`);
 }
 
 /**
